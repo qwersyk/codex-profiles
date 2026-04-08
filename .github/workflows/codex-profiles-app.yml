@@ -5,6 +5,9 @@ on:
   push:
   pull_request:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 permissions:
   contents: read
 
@@ -20,7 +23,7 @@ jobs:
         run: swift --version
 
       - name: Build app and dmg
-        shell: zsh
+        shell: bash
         run: |
           chmod +x Scripts/build_app.sh Scripts/build_dmg.sh
           ./Scripts/build_dmg.sh
