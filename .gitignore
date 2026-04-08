@@ -1,0 +1,6 @@
+.build
+dist
+Assets/AppIcon.iconset
+Assets/CodexProfiles.icns
+.DS_Store
+.idea

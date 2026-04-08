@@ -1,0 +1,43 @@
+name: Codex Profiles Build
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build .app and .dmg
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build app and dmg
+        shell: zsh
+        run: |
+          chmod +x Scripts/build_app.sh Scripts/build_dmg.sh
+          ./Scripts/build_dmg.sh
+          ls -la dist
+
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Codex-Profiles-app
+          if-no-files-found: error
+          retention-days: 14
+          path: "dist/Codex Profiles.app"
+
+      - name: Upload dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: Codex-Profiles-dmg
+          if-no-files-found: error
+          retention-days: 14
+          path: "dist/Codex Profiles.dmg"
