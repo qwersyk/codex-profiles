@@ -217,18 +217,52 @@ final class AppModel: ObservableObject {
     func loadProfile(_ row: ProfileRow) async {
         guard let id = row.profileID else { return }
         await runTask {
-            try await self.closeCodexIfNeeded()
-            _ = try self.store.restoreProfile(id: id)
-            self.reload()
-            try await self.launchCodex()
+            let shouldRelaunch = try await self.quitCodexIfRunning()
+            do {
+                _ = try self.store.restoreProfile(id: id)
+            } catch {
+                if shouldRelaunch {
+                    try? await self.launchCodex()
+                }
+                throw error
+            }
+
+            if shouldRelaunch {
+                try await self.launchCodex()
+            }
             self.reload()
         }
     }
 
-    func restartCodex() async {
+    func logoutCodex() async {
         await runTask {
-            try await self.closeCodexIfNeeded()
-            try await self.launchCodex()
+            let shouldRelaunch = try await self.quitCodexIfRunning()
+            do {
+                try self.runCodexLogout()
+            } catch {
+                if shouldRelaunch {
+                    try? await self.launchCodex()
+                }
+                throw error
+            }
+
+            if shouldRelaunch {
+                try await self.launchCodex()
+            }
+            self.reload()
+        }
+    }
+
+    func importAuthFile(from url: URL) async {
+        await runTask {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer {
+                if scoped {
+                    url.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            _ = try self.store.importAuthFile(from: url, fallbackIndex: self.profiles.count + 1)
             self.reload()
         }
     }
@@ -270,28 +304,56 @@ final class AppModel: ObservableObject {
         isWorking = false
     }
 
-    private func closeCodexIfNeeded() async throws {
+    private func quitCodexIfRunning() async throws -> Bool {
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: ProfileStore.codexBundleID)
-        guard !running.isEmpty else { return }
+        guard !running.isEmpty else { return false }
 
         for app in running {
             _ = app.terminate()
         }
 
-        for _ in 0..<20 {
+        for _ in 0..<40 {
             if NSRunningApplication.runningApplications(withBundleIdentifier: ProfileStore.codexBundleID).isEmpty {
-                return
+                try await Task.sleep(nanoseconds: 500_000_000)
+                return true
             }
-            try await Task.sleep(nanoseconds: 200_000_000)
+            try await Task.sleep(nanoseconds: 250_000_000)
         }
 
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: ProfileStore.codexBundleID) {
-            _ = app.forceTerminate()
-        }
-        try await Task.sleep(nanoseconds: 300_000_000)
+        throw StoreError.codexDidNotQuit
     }
 
     private func launchCodex() async throws {
+        let workspace = NSWorkspace.shared
+        let appURL = try codexAppURL()
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        try await workspace.openApplication(at: appURL, configuration: configuration)
+    }
+
+    private func runCodexLogout() throws {
+        let process = Process()
+        let output = Pipe()
+        let error = Pipe()
+        process.executableURL = try codexCLIURL()
+        process.arguments = ["logout"]
+        process.standardOutput = output
+        process.standardError = error
+
+        try process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0 else {
+            let stderr = String(data: error.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let stdout = String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw StoreError.logoutFailed(stderr?.isEmpty == false ? stderr! : (stdout?.isEmpty == false ? stdout! : nil))
+        }
+    }
+
+    private func codexAppURL() throws -> URL {
         let workspace = NSWorkspace.shared
         let appURL = workspace.urlForApplication(withBundleIdentifier: ProfileStore.codexBundleID)
             ?? URL(fileURLWithPath: "/Applications/Codex.app")
@@ -299,17 +361,26 @@ final class AppModel: ObservableObject {
         guard FileManager.default.fileExists(atPath: appURL.path) else {
             throw StoreError.codexMissing
         }
+        return appURL
+    }
 
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        try await workspace.openApplication(at: appURL, configuration: configuration)
+    private func codexCLIURL() throws -> URL {
+        let bundledCLI = try codexAppURL().appendingPathComponent("Contents/Resources/codex")
+        if FileManager.default.fileExists(atPath: bundledCLI.path) {
+            return bundledCLI
+        }
+        throw StoreError.codexCLIMissing
     }
 }
 
 private enum StoreError: LocalizedError {
     case missingSource(String)
     case missingProfile
+    case codexDidNotQuit
     case codexMissing
+    case codexCLIMissing
+    case invalidAuthFile
+    case logoutFailed(String?)
 
     var errorDescription: String? {
         switch self {
@@ -317,15 +388,18 @@ private enum StoreError: LocalizedError {
             return "Missing file: \(path)"
         case .missingProfile:
             return "Profile not found."
+        case .codexDidNotQuit:
+            return "Codex did not quit. Quit it manually and try again."
         case .codexMissing:
             return "Codex.app not found."
+        case .codexCLIMissing:
+            return "Codex CLI not found inside Codex.app."
+        case .invalidAuthFile:
+            return "This is not a Codex auth JSON file."
+        case .logoutFailed(let details):
+            return details?.isEmpty == false ? "Logout failed: \(details!)" : "Logout failed."
         }
     }
-}
-
-private struct SnapshotFile {
-    let liveURL: URL
-    let relativePath: String
 }
 
 private final class ProfileStore {
@@ -351,23 +425,14 @@ private final class ProfileStore {
     }
 
     func currentProfile() -> CurrentProfileInfo {
-        let authURL = homeURL.appendingPathComponent(".codex/auth.json")
         guard
             fileManager.fileExists(atPath: authURL.path),
-            let data = try? Data(contentsOf: authURL),
-            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let data = try? Data(contentsOf: authURL)
         else {
             return CurrentProfileInfo()
         }
 
-        let tokens = json["tokens"] as? [String: Any]
-        let idPayload = decodePayload(token: tokens?["id_token"] as? String)
-        let accessPayload = decodePayload(token: tokens?["access_token"] as? String)
-
-        let email = stringValue(from: idPayload, key: "email")
-            ?? stringValue(from: accessPayload, path: ["https://api.openai.com/profile", "email"])
-
-        return CurrentProfileInfo(email: email?.lowercased(), isAvailable: true)
+        return CurrentProfileInfo(email: authEmail(from: data)?.lowercased(), isAvailable: true)
     }
 
     func captureCurrent(
@@ -384,15 +449,13 @@ private final class ProfileStore {
         }
         let snapshotID = existingIndex.map { profiles[$0].id } ?? UUID()
         let snapshotRoot = snapshotsURL.appendingPathComponent(snapshotID.uuidString, isDirectory: true)
+        let snapshotAuthURL = self.snapshotAuthURL(for: snapshotID)
 
         do {
             if fileManager.fileExists(atPath: snapshotRoot.path) {
                 try fileManager.removeItem(at: snapshotRoot)
             }
-            try fileManager.createDirectory(at: snapshotRoot, withIntermediateDirectories: true, attributes: nil)
-            for file in snapshotFiles {
-                try copy(from: file.liveURL, to: snapshotRoot.appendingPathComponent(file.relativePath))
-            }
+            try copy(from: authURL, to: snapshotAuthURL)
 
             let profile = SavedProfile(
                 id: snapshotID,
@@ -406,7 +469,58 @@ private final class ProfileStore {
                 avatarColorToken: normalized(avatarColorToken)
                     ?? existingIndex.map { profiles[$0].avatarColorToken }
                     ?? AvatarTintOption.blue.rawValue,
-                createdAt: Date(),
+                createdAt: existingIndex.map { profiles[$0].createdAt } ?? Date(),
+                lastLoadedAt: existingIndex.flatMap { profiles[$0].lastLoadedAt }
+            )
+
+            if let existingIndex {
+                profiles[existingIndex] = profile
+            } else {
+                profiles.append(profile)
+            }
+            try save(profiles)
+            return profile
+        } catch {
+            try? fileManager.removeItem(at: snapshotRoot)
+            throw error
+        }
+    }
+
+    func importAuthFile(from url: URL, fallbackIndex: Int) throws -> SavedProfile {
+        let data = try Data(contentsOf: url)
+        guard isCodexAuth(data) else {
+            throw StoreError.invalidAuthFile
+        }
+
+        var profiles = try loadProfiles()
+        let email = authEmail(from: data)?.lowercased()
+        let existingIndex = normalized(email).flatMap { importedEmail in
+            profiles.firstIndex { normalized($0.email)?.lowercased() == importedEmail }
+        }
+        let snapshotID = existingIndex.map { profiles[$0].id } ?? UUID()
+        let snapshotRoot = snapshotsURL.appendingPathComponent(snapshotID.uuidString, isDirectory: true)
+        let authDestination = snapshotAuthURL(for: snapshotID)
+
+        do {
+            if fileManager.fileExists(atPath: snapshotRoot.path) {
+                try fileManager.removeItem(at: snapshotRoot)
+            }
+            try fileManager.createDirectory(
+                at: authDestination.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            try data.write(to: authDestination, options: .atomic)
+
+            let profile = SavedProfile(
+                id: snapshotID,
+                customName: existingIndex.map { profiles[$0].customName }
+                    ?? email
+                    ?? "Profile \(fallbackIndex)",
+                email: email,
+                avatarSymbol: existingIndex.map { profiles[$0].avatarSymbol } ?? AvatarOption.person.rawValue,
+                avatarColorToken: existingIndex.map { profiles[$0].avatarColorToken } ?? AvatarTintOption.blue.rawValue,
+                createdAt: existingIndex.map { profiles[$0].createdAt } ?? Date(),
                 lastLoadedAt: existingIndex.flatMap { profiles[$0].lastLoadedAt }
             )
 
@@ -447,8 +561,12 @@ private final class ProfileStore {
         }
 
         let snapshotRoot = snapshotsURL.appendingPathComponent(id.uuidString, isDirectory: true)
+        let legacySnapshotRoot = legacySnapshotsURL.appendingPathComponent(id.uuidString, isDirectory: true)
         if fileManager.fileExists(atPath: snapshotRoot.path) {
             try fileManager.removeItem(at: snapshotRoot)
+        }
+        if fileManager.fileExists(atPath: legacySnapshotRoot.path) {
+            try fileManager.removeItem(at: legacySnapshotRoot)
         }
 
         profiles.remove(at: index)
@@ -461,11 +579,8 @@ private final class ProfileStore {
             throw StoreError.missingProfile
         }
 
-        let snapshotRoot = snapshotsURL.appendingPathComponent(id.uuidString, isDirectory: true)
-        for file in snapshotFiles {
-            let source = snapshotRoot.appendingPathComponent(file.relativePath)
-            try copy(from: source, to: file.liveURL)
-        }
+        let source = try existingAuthURL(for: id)
+        try copy(from: source, to: authURL)
 
         profiles[index].lastLoadedAt = Date()
         try save(profiles)
@@ -486,21 +601,37 @@ private final class ProfileStore {
         storageURL.appendingPathComponent("Snapshots", isDirectory: true)
     }
 
+    private var legacySnapshotsURL: URL {
+        storageURL.appendingPathComponent("Profiles", isDirectory: true)
+    }
+
     private var indexURL: URL {
         storageURL.appendingPathComponent("profiles.json")
     }
 
-    private var snapshotFiles: [SnapshotFile] {
-        [
-            SnapshotFile(
-                liveURL: homeURL.appendingPathComponent(".codex/auth.json"),
-                relativePath: ".codex/auth.json"
-            ),
-            SnapshotFile(
-                liveURL: homeURL.appendingPathComponent(".codex/config.toml"),
-                relativePath: ".codex/config.toml"
-            ),
-        ]
+    private var authURL: URL {
+        homeURL.appendingPathComponent(".codex/auth.json")
+    }
+
+    private func snapshotAuthURL(for id: UUID) -> URL {
+        snapshotsURL.appendingPathComponent(id.uuidString, isDirectory: true)
+            .appendingPathComponent(".codex/auth.json")
+    }
+
+    private func existingAuthURL(for id: UUID) throws -> URL {
+        let currentURL = snapshotAuthURL(for: id)
+        if fileManager.fileExists(atPath: currentURL.path) {
+            return currentURL
+        }
+
+        let legacyURL = legacySnapshotsURL
+            .appendingPathComponent(id.uuidString, isDirectory: true)
+            .appendingPathComponent(".codex/auth.json")
+        if fileManager.fileExists(atPath: legacyURL.path) {
+            return legacyURL
+        }
+
+        throw StoreError.missingSource(currentURL.path)
     }
 
     private func save(_ profiles: [SavedProfile]) throws {
@@ -550,6 +681,31 @@ private final class ProfileStore {
             return nil
         }
         return payload
+    }
+
+    private func isCodexAuth(_ data: Data) -> Bool {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        let tokens = json["tokens"] as? [String: Any]
+        let hasChatGPTToken = normalized(tokens?["refresh_token"] as? String) != nil
+            || normalized(tokens?["access_token"] as? String) != nil
+            || normalized(tokens?["id_token"] as? String) != nil
+        let hasAPIKey = normalized(json["OPENAI_API_KEY"] as? String) != nil
+        return hasChatGPTToken || hasAPIKey
+    }
+
+    private func authEmail(from data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+
+        let tokens = json["tokens"] as? [String: Any]
+        let idPayload = decodePayload(token: tokens?["id_token"] as? String)
+        let accessPayload = decodePayload(token: tokens?["access_token"] as? String)
+
+        return stringValue(from: idPayload, key: "email")
+            ?? stringValue(from: accessPayload, path: ["https://api.openai.com/profile", "email"])
     }
 
     private func stringValue(from payload: [String: Any]?, key: String) -> String? {

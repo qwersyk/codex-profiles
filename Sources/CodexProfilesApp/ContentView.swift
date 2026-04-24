@@ -1,10 +1,12 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
 
     @AppStorage("sort_order") private var sortOrderRaw = SortOrder.recent.rawValue
     @State private var prompt: NamePrompt?
+    @State private var isImporting = false
     @State private var draftName = ""
     @State private var draftAvatarSymbol = AvatarOption.person.rawValue
     @State private var draftAvatarColorToken = AvatarTintOption.blue.rawValue
@@ -74,6 +76,14 @@ struct ContentView: View {
                 .help("Refresh")
 
                 Button {
+                    isImporting = true
+                } label: {
+                    Image(systemName: "tray.and.arrow.down")
+                }
+                .keyboardShortcut("i", modifiers: [.command])
+                .help("Import Auth JSON")
+
+                Button {
                     Task { await addCurrentProfile() }
                 } label: {
                     Image(systemName: "plus")
@@ -82,12 +92,20 @@ struct ContentView: View {
                 .help("Add Current Profile")
 
                 Button {
-                    Task { await model.restartCodex() }
+                    Task { await model.logoutCodex() }
                 } label: {
-                    Image(systemName: "restart")
+                    Image(systemName: "rectangle.portrait.and.arrow.right")
                 }
-                .keyboardShortcut("r", modifiers: [.command, .shift])
-                .help("Restart Codex")
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+                .help("Logout")
+            }
+        }
+        .fileImporter(isPresented: $isImporting, allowedContentTypes: [.json]) { result in
+            switch result {
+            case .success(let url):
+                Task { await model.importAuthFile(from: url) }
+            case .failure(let error):
+                model.errorMessage = error.localizedDescription
             }
         }
         .sheet(item: $prompt) { prompt in
