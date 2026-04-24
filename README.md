@@ -14,9 +14,11 @@ Small native macOS app for saving and loading local Codex profiles.
 
 ## Features
 
+- Browser sign-in for a new profile without using the Codex app session
 - Current profile highlight
 - Replace existing profile when the same email is saved again
 - Import Codex auth JSON files
+- Import and export app backup files
 - Logout via the official Codex CLI
 - Rename, delete and avatar selection
 - Compact toolbar actions
@@ -28,7 +30,10 @@ Profiles saved before recent Codex auth/runtime updates may not work because old
 ## Shortcuts
 
 - `Cmd+N` add current profile
+- `Shift+Cmd+N` sign in a new profile
 - `Cmd+I` import auth JSON
+- `Shift+Cmd+I` import backup
+- `Shift+Cmd+E` export all profiles
 - `Cmd+R` refresh
 - `Shift+Cmd+L` logout
 

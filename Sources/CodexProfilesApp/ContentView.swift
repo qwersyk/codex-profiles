@@ -1,12 +1,10 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
 
     @AppStorage("sort_order") private var sortOrderRaw = SortOrder.recent.rawValue
     @State private var prompt: NamePrompt?
-    @State private var isImporting = false
     @State private var draftName = ""
     @State private var draftAvatarSymbol = AvatarOption.person.rawValue
     @State private var draftAvatarColorToken = AvatarTintOption.blue.rawValue
@@ -31,6 +29,9 @@ struct ContentView: View {
                         deleteAction: {
                             guard let id = row.profileID else { return }
                             Task { await model.deleteProfile(id: id) }
+                        },
+                        exportAction: {
+                            Task { await model.exportProfile(row) }
                         },
                         addAction: {
                             Task { await addCurrentProfile() }
@@ -76,20 +77,50 @@ struct ContentView: View {
                 .help("Refresh")
 
                 Button {
-                    isImporting = true
+                    Task { await model.importProfileFromPanel() }
                 } label: {
                     Image(systemName: "tray.and.arrow.down")
                 }
                 .keyboardShortcut("i", modifiers: [.command])
-                .help("Import Auth JSON")
+                .help("Import Profile")
 
-                Button {
-                    Task { await addCurrentProfile() }
+                Menu {
+                    Button {
+                        Task { await addCurrentProfile() }
+                    } label: {
+                        Label("Save Current Codex", systemImage: "plus")
+                    }
+                    .keyboardShortcut("n", modifiers: [.command])
+
+                    Button {
+                        Task { await model.startBrowserLoginProfile() }
+                    } label: {
+                        Label("Sign In New Profile", systemImage: "globe")
+                    }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
                 } label: {
                     Image(systemName: "plus")
                 }
-                .keyboardShortcut("n", modifiers: [.command])
-                .help("Add Current Profile")
+                .help("Create Profile")
+
+                Menu {
+                    Button {
+                        Task { await model.importArchiveFromPanel() }
+                    } label: {
+                        Label("Import Backup", systemImage: "square.and.arrow.down.on.square")
+                    }
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
+
+                    Button {
+                        Task { await model.exportAllProfiles() }
+                    } label: {
+                        Label("Export All", systemImage: "square.and.arrow.up.on.square")
+                    }
+                    .keyboardShortcut("e", modifiers: [.command, .shift])
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .help("Backup")
 
                 Button {
                     Task { await model.logoutCodex() }
@@ -98,14 +129,6 @@ struct ContentView: View {
                 }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
                 .help("Logout")
-            }
-        }
-        .fileImporter(isPresented: $isImporting, allowedContentTypes: [.json]) { result in
-            switch result {
-            case .success(let url):
-                Task { await model.importAuthFile(from: url) }
-            case .failure(let error):
-                model.errorMessage = error.localizedDescription
             }
         }
         .sheet(item: $prompt) { prompt in
@@ -126,6 +149,26 @@ struct ContentView: View {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     nameFocused = true
                 }
+            }
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { model.browserLogin != nil },
+                set: { if !$0 { model.cancelBrowserLogin() } }
+            )
+        ) {
+            if let login = model.browserLogin {
+                BrowserLoginView(
+                    state: login,
+                    openAction: {
+                        if let url = login.authorizationURL {
+                            NSWorkspace.shared.open(url)
+                        }
+                    },
+                    cancelAction: {
+                        model.cancelBrowserLogin()
+                    }
+                )
             }
         }
         .alert(
@@ -197,6 +240,7 @@ private struct ProfileRowView: View {
     let renameAction: () -> Void
     let loadAction: () -> Void
     let deleteAction: () -> Void
+    let exportAction: () -> Void
     let addAction: () -> Void
 
     var body: some View {
@@ -248,6 +292,7 @@ private struct ProfileRowView: View {
             } else {
                 HStack(spacing: 6) {
                     IconPill(symbol: "trash", action: deleteAction, help: "Delete Profile")
+                    IconPill(symbol: "square.and.arrow.up", action: exportAction, help: "Export Profile")
                     IconPill(symbol: "arrow.down.circle", action: loadAction, help: "Load Profile")
                 }
             }
@@ -430,6 +475,53 @@ private struct NamePromptView: View {
         case .red: return .red
         case .teal: return .teal
         }
+    }
+}
+
+private struct BrowserLoginView: View {
+    let state: BrowserLoginState
+    let openAction: () -> Void
+    let cancelAction: () -> Void
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "globe")
+                .font(.system(size: 22, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            Text(state.message)
+                .font(.system(size: 13, weight: .medium))
+
+            if let url = state.authorizationURL {
+                Text(url.absoluteString)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(3)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            HStack(spacing: 8) {
+                Spacer()
+
+                Button(action: cancelAction) {
+                    Image(systemName: "xmark")
+                        .frame(width: 28, height: 28)
+                }
+                .keyboardShortcut(.cancelAction)
+
+                if state.authorizationURL != nil {
+                    Button(action: openAction) {
+                        Image(systemName: "arrow.up.forward.app")
+                            .frame(width: 28, height: 28)
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .frame(width: 320)
     }
 }
 

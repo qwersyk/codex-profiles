@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 
 struct SavedProfile: Codable, Identifiable, Equatable {
     let id: UUID
@@ -98,14 +99,21 @@ enum AvatarTintOption: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+struct BrowserLoginState: Equatable {
+    var message: String
+    var authorizationURL: URL?
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var profiles: [SavedProfile] = []
     @Published private(set) var currentProfile = CurrentProfileInfo()
     @Published var isWorking = false
     @Published var errorMessage: String?
+    @Published var browserLogin: BrowserLoginState?
 
     private let store = ProfileStore()
+    private var loginController: CodexLoginController?
 
     init() {
         reload()
@@ -195,6 +203,35 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func startBrowserLoginProfile() async {
+        guard loginController == nil else { return }
+
+        errorMessage = nil
+        browserLogin = BrowserLoginState(
+            message: "Start sign in in your browser.",
+            authorizationURL: nil
+        )
+        isWorking = true
+
+        do {
+            let controller = try CodexLoginController.start(codexCLIURL: try codexCLIURL()) { event in
+                Task { @MainActor in
+                    self.handleLoginEvent(event)
+                }
+            }
+            loginController = controller
+        } catch {
+            browserLogin = nil
+            isWorking = false
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func cancelBrowserLogin() {
+        loginController?.cancel()
+        browserLogin = nil
+    }
+
     func updateProfile(id: UUID, name: String, avatarSymbol: String, avatarColorToken: String) async {
         await runTask {
             try self.store.updateProfile(
@@ -262,8 +299,46 @@ final class AppModel: ObservableObject {
                 }
             }
 
-            _ = try self.store.importAuthFile(from: url, fallbackIndex: self.profiles.count + 1)
+            _ = try self.store.importFile(from: url, fallbackIndex: self.profiles.count + 1)
             self.reload()
+        }
+    }
+
+    func importProfileFromPanel() async {
+        await runTask {
+            guard let url = self.openPanel(title: "Import Profile") else { return }
+            _ = try self.store.importFile(from: url, fallbackIndex: self.profiles.count + 1)
+            self.reload()
+        }
+    }
+
+    func importArchiveFromPanel() async {
+        await runTask {
+            guard let url = self.openPanel(title: "Import Backup") else { return }
+            try self.store.importArchive(from: url)
+            self.reload()
+        }
+    }
+
+    func exportProfile(_ row: ProfileRow) async {
+        guard let id = row.profileID else { return }
+
+        await runTask {
+            guard let url = self.savePanel(
+                title: "Export Profile",
+                suggestedName: "\(self.safeFilename(row.title)).codexprofile.json"
+            ) else { return }
+            try self.store.exportProfile(id: id, to: url)
+        }
+    }
+
+    func exportAllProfiles() async {
+        await runTask {
+            guard let url = self.savePanel(
+                title: "Export All Profiles",
+                suggestedName: "Codex-Profiles-Backup.codexprofiles.json"
+            ) else { return }
+            try self.store.exportAll(to: url)
         }
     }
 
@@ -302,6 +377,45 @@ final class AppModel: ObservableObject {
         }
 
         isWorking = false
+    }
+
+    private func handleLoginEvent(_ event: CodexLoginEvent) {
+        switch event {
+        case .ready(let url):
+            browserLogin?.message = "If the browser did not open, use this link."
+            browserLogin?.authorizationURL = url
+        case .finished(let exitCode, let stdout, let stderr, let wasCancelled):
+            defer {
+                loginController?.cleanup()
+                loginController = nil
+                browserLogin = nil
+                isWorking = false
+            }
+
+            if wasCancelled {
+                return
+            }
+
+            guard exitCode == 0 else {
+                let details = [stderr, stdout]
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .first { !$0.isEmpty }
+                errorMessage = StoreError.loginFailed(details?.isEmpty == false ? details : nil).localizedDescription
+                return
+            }
+
+            guard let authURL = loginController?.authURL else {
+                errorMessage = StoreError.loginFailed("Missing auth.json after login.").localizedDescription
+                return
+            }
+
+            do {
+                _ = try store.importFile(from: authURL, fallbackIndex: profiles.count + 1)
+                reload()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
     }
 
     private func quitCodexIfRunning() async throws -> Bool {
@@ -371,15 +485,44 @@ final class AppModel: ObservableObject {
         }
         throw StoreError.codexCLIMissing
     }
+
+    private func openPanel(title: String) -> URL? {
+        let panel = NSOpenPanel()
+        panel.title = title
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canCreateDirectories = false
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private func savePanel(title: String, suggestedName: String) -> URL? {
+        let panel = NSSavePanel()
+        panel.title = title
+        panel.allowedContentTypes = [.json]
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = suggestedName
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    private func safeFilename(_ value: String) -> String {
+        let invalid = CharacterSet(charactersIn: "/:\\?%*|\"<>")
+        let parts = value.components(separatedBy: invalid)
+        let joined = parts.joined(separator: "-").trimmingCharacters(in: .whitespacesAndNewlines)
+        return joined.isEmpty ? "Profile" : joined
+    }
 }
 
 private enum StoreError: LocalizedError {
     case missingSource(String)
     case missingProfile
+    case noProfilesToExport
     case codexDidNotQuit
     case codexMissing
     case codexCLIMissing
     case invalidAuthFile
+    case invalidArchive
+    case loginFailed(String?)
     case logoutFailed(String?)
 
     var errorDescription: String? {
@@ -388,6 +531,8 @@ private enum StoreError: LocalizedError {
             return "Missing file: \(path)"
         case .missingProfile:
             return "Profile not found."
+        case .noProfilesToExport:
+            return "No profiles to export."
         case .codexDidNotQuit:
             return "Codex did not quit. Quit it manually and try again."
         case .codexMissing:
@@ -396,9 +541,181 @@ private enum StoreError: LocalizedError {
             return "Codex CLI not found inside Codex.app."
         case .invalidAuthFile:
             return "This is not a Codex auth JSON file."
+        case .invalidArchive:
+            return "This is not a Codex Profiles backup file."
+        case .loginFailed(let details):
+            return details?.isEmpty == false ? "Login failed: \(details!)" : "Login failed."
         case .logoutFailed(let details):
             return details?.isEmpty == false ? "Logout failed: \(details!)" : "Logout failed."
         }
+    }
+}
+
+private struct ProfilesArchive: Codable {
+    static let format = "codex-profiles-archive"
+
+    let format: String
+    let version: Int
+    let exportedAt: Date
+    let profiles: [ArchivedProfile]
+
+    init(profiles: [ArchivedProfile]) {
+        self.format = Self.format
+        self.version = 1
+        self.exportedAt = Date()
+        self.profiles = profiles
+    }
+}
+
+private struct ArchivedProfile: Codable {
+    let customName: String?
+    let email: String?
+    let avatarSymbol: String?
+    let avatarColorToken: String?
+    let createdAt: Date
+    let lastLoadedAt: Date?
+    let authJSONString: String
+}
+
+private enum CodexLoginEvent {
+    case ready(URL)
+    case finished(Int32, String, String, Bool)
+}
+
+private final class CodexLoginController {
+    let authURL: URL
+
+    private let fileManager = FileManager.default
+    private let process = Process()
+    private let tempHomeURL: URL
+    private let stdoutURL: URL
+    private let stderrURL: URL
+    private let stdoutHandle: FileHandle
+    private let stderrHandle: FileHandle
+    private let eventHandler: (CodexLoginEvent) -> Void
+    private let lock = NSLock()
+    private var didEmitURL = false
+    private var wasCancelled = false
+    private var pollTask: Task<Void, Never>?
+
+    static func start(codexCLIURL: URL, eventHandler: @escaping (CodexLoginEvent) -> Void) throws -> CodexLoginController {
+        let tempHomeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-profiles-login-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempHomeURL, withIntermediateDirectories: true, attributes: nil)
+        try FileManager.default.createDirectory(
+            at: tempHomeURL.appendingPathComponent(".codex", isDirectory: true),
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+
+        let stdoutURL = tempHomeURL.appendingPathComponent("login.stdout")
+        let stderrURL = tempHomeURL.appendingPathComponent("login.stderr")
+        FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
+        FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
+
+        let stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+        let stderrHandle = try FileHandle(forWritingTo: stderrURL)
+
+        let controller = CodexLoginController(
+            tempHomeURL: tempHomeURL,
+            stdoutURL: stdoutURL,
+            stderrURL: stderrURL,
+            stdoutHandle: stdoutHandle,
+            stderrHandle: stderrHandle,
+            eventHandler: eventHandler
+        )
+        try controller.startProcess(codexCLIURL: codexCLIURL)
+        return controller
+    }
+
+    private init(
+        tempHomeURL: URL,
+        stdoutURL: URL,
+        stderrURL: URL,
+        stdoutHandle: FileHandle,
+        stderrHandle: FileHandle,
+        eventHandler: @escaping (CodexLoginEvent) -> Void
+    ) {
+        self.tempHomeURL = tempHomeURL
+        self.stdoutURL = stdoutURL
+        self.stderrURL = stderrURL
+        self.stdoutHandle = stdoutHandle
+        self.stderrHandle = stderrHandle
+        self.eventHandler = eventHandler
+        self.authURL = tempHomeURL.appendingPathComponent(".codex/auth.json")
+    }
+
+    func cancel() {
+        lock.lock()
+        wasCancelled = true
+        lock.unlock()
+        process.terminate()
+    }
+
+    func cleanup() {
+        pollTask?.cancel()
+        try? stdoutHandle.close()
+        try? stderrHandle.close()
+        try? fileManager.removeItem(at: tempHomeURL)
+    }
+
+    private func startProcess(codexCLIURL: URL) throws {
+        process.executableURL = codexCLIURL
+        process.arguments = ["login", "-c", "auth_credentials_store_mode=\"file_storage\""]
+        process.currentDirectoryURL = tempHomeURL
+        process.standardOutput = stdoutHandle
+        process.standardError = stderrHandle
+        process.environment = processEnvironment()
+        process.terminationHandler = { [weak self] process in
+            guard let self else { return }
+            self.pollTask?.cancel()
+            self.emitLoginURLIfNeeded()
+            let stdout = self.readText(from: self.stdoutURL)
+            let stderr = self.readText(from: self.stderrURL)
+            self.lock.lock()
+            let wasCancelled = self.wasCancelled
+            self.lock.unlock()
+            self.eventHandler(.finished(process.terminationStatus, stdout, stderr, wasCancelled))
+        }
+
+        try process.run()
+        pollTask = Task.detached { [weak self] in
+            while let self, self.process.isRunning {
+                self.emitLoginURLIfNeeded()
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+        }
+    }
+
+    private func emitLoginURLIfNeeded() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !didEmitURL else { return }
+
+        let text = readText(from: stderrURL)
+        guard let url = extractFirstURL(from: text) else { return }
+
+        didEmitURL = true
+        eventHandler(.ready(url))
+    }
+
+    private func processEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        environment["HOME"] = tempHomeURL.path
+        environment["CODEX_HOME"] = tempHomeURL.appendingPathComponent(".codex").path
+        return environment
+    }
+
+    private func readText(from url: URL) -> String {
+        (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }
+
+    private func extractFirstURL(from text: String) -> URL? {
+        let pattern = #"https://auth\.openai\.com/\S+"#
+        guard let range = text.range(of: pattern, options: .regularExpression) else {
+            return nil
+        }
+        return URL(string: String(text[range]))
     }
 }
 
@@ -488,53 +805,49 @@ private final class ProfileStore {
 
     func importAuthFile(from url: URL, fallbackIndex: Int) throws -> SavedProfile {
         let data = try Data(contentsOf: url)
-        guard isCodexAuth(data) else {
-            throw StoreError.invalidAuthFile
+        return try importAuthData(data, metadata: nil, fallbackIndex: fallbackIndex)
+    }
+
+    func importFile(from url: URL, fallbackIndex: Int) throws -> Int {
+        let data = try Data(contentsOf: url)
+        if let archive = try decodeArchive(from: data) {
+            return try importArchive(archive)
         }
 
-        var profiles = try loadProfiles()
-        let email = authEmail(from: data)?.lowercased()
-        let existingIndex = normalized(email).flatMap { importedEmail in
-            profiles.firstIndex { normalized($0.email)?.lowercased() == importedEmail }
+        _ = try importAuthData(data, metadata: nil, fallbackIndex: fallbackIndex)
+        return 1
+    }
+
+    func importArchive(from url: URL) throws {
+        let data = try Data(contentsOf: url)
+        guard let archive = try decodeArchive(from: data) else {
+            throw StoreError.invalidArchive
         }
-        let snapshotID = existingIndex.map { profiles[$0].id } ?? UUID()
-        let snapshotRoot = snapshotsURL.appendingPathComponent(snapshotID.uuidString, isDirectory: true)
-        let authDestination = snapshotAuthURL(for: snapshotID)
+        _ = try importArchive(archive)
+    }
 
-        do {
-            if fileManager.fileExists(atPath: snapshotRoot.path) {
-                try fileManager.removeItem(at: snapshotRoot)
-            }
-            try fileManager.createDirectory(
-                at: authDestination.deletingLastPathComponent(),
-                withIntermediateDirectories: true,
-                attributes: nil
-            )
-            try data.write(to: authDestination, options: .atomic)
-
-            let profile = SavedProfile(
-                id: snapshotID,
-                customName: existingIndex.map { profiles[$0].customName }
-                    ?? email
-                    ?? "Profile \(fallbackIndex)",
-                email: email,
-                avatarSymbol: existingIndex.map { profiles[$0].avatarSymbol } ?? AvatarOption.person.rawValue,
-                avatarColorToken: existingIndex.map { profiles[$0].avatarColorToken } ?? AvatarTintOption.blue.rawValue,
-                createdAt: existingIndex.map { profiles[$0].createdAt } ?? Date(),
-                lastLoadedAt: existingIndex.flatMap { profiles[$0].lastLoadedAt }
-            )
-
-            if let existingIndex {
-                profiles[existingIndex] = profile
-            } else {
-                profiles.append(profile)
-            }
-            try save(profiles)
-            return profile
-        } catch {
-            try? fileManager.removeItem(at: snapshotRoot)
-            throw error
+    func exportProfile(id: UUID, to url: URL) throws {
+        let profiles = try loadProfiles()
+        guard let profile = profiles.first(where: { $0.id == id }) else {
+            throw StoreError.missingProfile
         }
+
+        let archived = try archivedProfile(for: profile)
+        let archive = ProfilesArchive(profiles: [archived])
+        let data = try encoder.encode(archive)
+        try data.write(to: url, options: .atomic)
+    }
+
+    func exportAll(to url: URL) throws {
+        let profiles = try loadProfiles()
+        guard !profiles.isEmpty else {
+            throw StoreError.noProfilesToExport
+        }
+
+        let archived = try profiles.map(archivedProfile(for:))
+        let archive = ProfilesArchive(profiles: archived)
+        let data = try encoder.encode(archive)
+        try data.write(to: url, options: .atomic)
     }
 
     func updateProfile(
@@ -638,6 +951,111 @@ private final class ProfileStore {
         try fileManager.createDirectory(at: storageURL, withIntermediateDirectories: true, attributes: nil)
         let data = try encoder.encode(profiles)
         try data.write(to: indexURL, options: .atomic)
+    }
+
+    private func importArchive(_ archive: ProfilesArchive) throws -> Int {
+        guard archive.format == ProfilesArchive.format else {
+            throw StoreError.invalidArchive
+        }
+
+        for (offset, archived) in archive.profiles.enumerated() {
+            let data = Data(archived.authJSONString.utf8)
+            _ = try importAuthData(
+                data,
+                metadata: archived,
+                fallbackIndex: offset + 1
+            )
+        }
+        return archive.profiles.count
+    }
+
+    private func decodeArchive(from data: Data) throws -> ProfilesArchive? {
+        guard let archive = try? decoder.decode(ProfilesArchive.self, from: data) else {
+            return nil
+        }
+        guard archive.format == ProfilesArchive.format else {
+            throw StoreError.invalidArchive
+        }
+        return archive
+    }
+
+    private func importAuthData(
+        _ data: Data,
+        metadata: ArchivedProfile?,
+        fallbackIndex: Int
+    ) throws -> SavedProfile {
+        guard isCodexAuth(data) else {
+            throw StoreError.invalidAuthFile
+        }
+
+        var profiles = try loadProfiles()
+        let email = authEmail(from: data)?.lowercased() ?? metadata?.email?.lowercased()
+        let existingIndex = normalized(email).flatMap { importedEmail in
+            profiles.firstIndex { normalized($0.email)?.lowercased() == importedEmail }
+        }
+        let snapshotID = existingIndex.map { profiles[$0].id } ?? UUID()
+        let snapshotRoot = snapshotsURL.appendingPathComponent(snapshotID.uuidString, isDirectory: true)
+        let authDestination = snapshotAuthURL(for: snapshotID)
+
+        do {
+            if fileManager.fileExists(atPath: snapshotRoot.path) {
+                try fileManager.removeItem(at: snapshotRoot)
+            }
+            try fileManager.createDirectory(
+                at: authDestination.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+            try data.write(to: authDestination, options: .atomic)
+
+            let profile = SavedProfile(
+                id: snapshotID,
+                customName: metadata?.customName
+                    ?? existingIndex.map { profiles[$0].customName }
+                    ?? email
+                    ?? "Profile \(fallbackIndex)",
+                email: email,
+                avatarSymbol: metadata?.avatarSymbol
+                    ?? existingIndex.map { profiles[$0].avatarSymbol }
+                    ?? AvatarOption.person.rawValue,
+                avatarColorToken: metadata?.avatarColorToken
+                    ?? existingIndex.map { profiles[$0].avatarColorToken }
+                    ?? AvatarTintOption.blue.rawValue,
+                createdAt: metadata?.createdAt
+                    ?? existingIndex.map { profiles[$0].createdAt }
+                    ?? Date(),
+                lastLoadedAt: metadata?.lastLoadedAt
+                    ?? existingIndex.flatMap { profiles[$0].lastLoadedAt }
+            )
+
+            if let existingIndex {
+                profiles[existingIndex] = profile
+            } else {
+                profiles.append(profile)
+            }
+            try save(profiles)
+            return profile
+        } catch {
+            try? fileManager.removeItem(at: snapshotRoot)
+            throw error
+        }
+    }
+
+    private func archivedProfile(for profile: SavedProfile) throws -> ArchivedProfile {
+        let authData = try Data(contentsOf: existingAuthURL(for: profile.id))
+        guard let authJSONString = String(data: authData, encoding: .utf8) else {
+            throw StoreError.invalidAuthFile
+        }
+
+        return ArchivedProfile(
+            customName: profile.customName,
+            email: profile.email,
+            avatarSymbol: profile.avatarSymbol,
+            avatarColorToken: profile.avatarColorToken,
+            createdAt: profile.createdAt,
+            lastLoadedAt: profile.lastLoadedAt,
+            authJSONString: authJSONString
+        )
     }
 
     private func copy(from source: URL, to destination: URL) throws {
