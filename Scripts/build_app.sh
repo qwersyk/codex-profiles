@@ -45,12 +45,27 @@ cat > "$APP_DIR/Contents/Info.plist" <<'EOF'
     <string>Codex Profiles</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>JSON</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.json</string>
+            </array>
+        </dict>
+    </array>
     <key>NSHumanReadableCopyright</key>
     <string>qwersyk</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.2</string>
+    <string>1.3</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>4</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>

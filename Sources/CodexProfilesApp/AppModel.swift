@@ -292,22 +292,35 @@ final class AppModel: ObservableObject {
 
     func importAuthFile(from url: URL) async {
         await runTask {
-            let scoped = url.startAccessingSecurityScopedResource()
-            defer {
-                if scoped {
-                    url.stopAccessingSecurityScopedResource()
-                }
+            _ = try self.importFileScoped(from: url, fallbackIndex: self.profiles.count + 1)
+            self.reload()
+        }
+    }
+
+    func importFiles(_ urls: [URL]) async {
+        await runTask {
+            let fileURLs = urls.filter(\.isFileURL)
+            guard !fileURLs.isEmpty else { return }
+
+            var nextIndex = self.profiles.count + 1
+            var didChange = false
+
+            for url in fileURLs {
+                let importedCount = try self.importFileScoped(from: url, fallbackIndex: nextIndex)
+                nextIndex += max(importedCount, 1)
+                didChange = true
             }
 
-            _ = try self.store.importFile(from: url, fallbackIndex: self.profiles.count + 1)
-            self.reload()
+            if didChange {
+                self.reload()
+            }
         }
     }
 
     func importProfileFromPanel() async {
         await runTask {
             guard let url = self.openPanel(title: "Import Profile") else { return }
-            _ = try self.store.importFile(from: url, fallbackIndex: self.profiles.count + 1)
+            _ = try self.importFileScoped(from: url, fallbackIndex: self.profiles.count + 1)
             self.reload()
         }
     }
@@ -510,6 +523,17 @@ final class AppModel: ObservableObject {
         let parts = value.components(separatedBy: invalid)
         let joined = parts.joined(separator: "-").trimmingCharacters(in: .whitespacesAndNewlines)
         return joined.isEmpty ? "Profile" : joined
+    }
+
+    private func importFileScoped(from url: URL, fallbackIndex: Int) throws -> Int {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer {
+            if scoped {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        return try store.importFile(from: url, fallbackIndex: fallbackIndex)
     }
 }
 

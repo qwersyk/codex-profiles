@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
@@ -8,6 +9,7 @@ struct ContentView: View {
     @State private var draftName = ""
     @State private var draftAvatarSymbol = AvatarOption.person.rawValue
     @State private var draftAvatarColorToken = AvatarTintOption.blue.rawValue
+    @State private var isDropTargeted = false
     @FocusState private var nameFocused: Bool
 
     var body: some View {
@@ -50,6 +52,14 @@ struct ContentView: View {
             .padding(10)
         }
         .background(Color(nsColor: .windowBackgroundColor))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 1.5, dash: [6, 6]))
+                .padding(10)
+                .opacity(isDropTargeted ? 0.9 : 0)
+                .animation(.easeOut(duration: 0.15), value: isDropTargeted)
+        }
+        .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted, perform: handleDrop(providers:))
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 if model.isWorking {
@@ -232,6 +242,46 @@ struct ContentView: View {
             draftAvatarSymbol = AvatarOption.person.rawValue
             draftAvatarColorToken = AvatarTintOption.blue.rawValue
         }
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        let fileProviders = providers.filter { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }
+        guard !fileProviders.isEmpty else { return false }
+
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var urls: [URL] = []
+
+        for provider in fileProviders {
+            group.enter()
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                defer { group.leave() }
+                guard let url = droppedURL(from: item), url.isFileURL else { return }
+                lock.lock()
+                urls.append(url)
+                lock.unlock()
+            }
+        }
+
+        group.notify(queue: .main) {
+            guard !urls.isEmpty else { return }
+            Task { await model.importFiles(urls) }
+        }
+
+        return true
+    }
+
+    private func droppedURL(from item: NSSecureCoding?) -> URL? {
+        if let url = item as? URL {
+            return url
+        }
+        if let data = item as? Data {
+            return URL(dataRepresentation: data, relativeTo: nil)
+        }
+        if let string = item as? String, let url = URL(string: string), url.isFileURL {
+            return url
+        }
+        return nil
     }
 }
 
