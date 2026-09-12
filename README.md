@@ -1,51 +1,27 @@
-# Codex Profiles
+<p align="center">
+  <img src="screenshots/codex-profiles-logo.png" width="128" alt="Codex Profiles logo">
+</p>
+
+<h1 align="center">Codex Profiles</h1>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="screenshots/1b.png">
-  <source media="(prefers-color-scheme: light)" srcset="screenshots/1w.png">
-  <img alt="Codex Profiles screenshot" src="screenshots/1w.png">
+  <source media="(prefers-color-scheme: dark)" srcset="screenshots/codex-profiles-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="screenshots/codex-profiles-light.png">
+  <img alt="Codex Profiles in light mode" src="screenshots/codex-profiles-light.png">
 </picture>
 
-Small native macOS app for saving and loading local Codex profiles.
-
-## Saved files
-
-- `~/.codex/auth.json`
+Native macOS manager for local ChatGPT / Codex profiles.
 
 ## Features
 
-- Browser sign-in for a new profile without using the Codex app session
-- Current profile highlight
-- Replace existing profile when the same email is saved again
-- Import Codex auth JSON files
-- Drag and drop JSON files onto the window or app icon
-- Import and export app backup files
-- Logout via the official Codex CLI
-- Rename, delete and avatar selection
-- Compact toolbar actions
-
-When loading or logging out, the app quits Codex normally, changes only `auth.json`, then opens Codex again.
-
-Profiles saved before recent Codex auth/runtime updates may not work because old sessions can expire or be invalidated by Codex. Recreate those profiles from a currently working Codex login, or import a fresh Codex auth JSON.
-
-## Shortcuts
-
-- `Cmd+N` add current profile
-- `Shift+Cmd+N` sign in a new profile
-- `Cmd+I` import auth JSON
-- `Shift+Cmd+I` import backup
-- `Shift+Cmd+E` export all profiles
-- `Cmd+R` refresh
-- `Shift+Cmd+L` logout
+- Save, switch, import, export, and locally sign out of profiles
+- Optional email hiding, search, avatars, and profile renaming
 
 ## Build
 
 ```bash
-chmod +x Scripts/build_app.sh Scripts/build_dmg.sh
+chmod +x Scripts/build_dmg.sh
 ./Scripts/build_dmg.sh
 ```
 
-Artifacts:
-
-- `dist/Codex Profiles.app`
-- `dist/Codex Profiles.dmg`
+The app and DMG are created in `dist/`.

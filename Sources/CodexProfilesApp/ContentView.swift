@@ -4,6 +4,11 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @ObservedObject var model: AppModel
 
+    @AppStorage("hide_emails") private var hideEmails = false
+    @State private var searchText = ""
+    @AppStorage("show_search") private var showSearch = false
+    @State private var sessionInfo: String?
+    @FocusState private var searchFocused: Bool
     @AppStorage("sort_order") private var sortOrderRaw = SortOrder.recent.rawValue
     @State private var prompt: NamePrompt?
     @State private var draftName = ""
@@ -18,6 +23,7 @@ struct ContentView: View {
                 ForEach(rows) { row in
                     ProfileRowView(
                         row: row,
+                        hideEmails: hideEmails,
                         renameAction: {
                             guard let prompt = model.renamePrompt(for: row) else { return }
                             self.prompt = prompt
@@ -35,6 +41,8 @@ struct ContentView: View {
                         exportAction: {
                             Task { await model.exportProfile(row) }
                         },
+                        detailsAction: { sessionInfo = model.sessionDetails(for: row) },
+                        signInAction: { Task { await model.startBrowserLoginProfile() } },
                         addAction: {
                             Task { await addCurrentProfile() }
                         }
@@ -42,7 +50,12 @@ struct ContentView: View {
                 }
 
                 if rows.isEmpty {
-                    Image(systemName: "tray")
+                    Text(searchText.isEmpty ? "No saved profiles" : "No matching profiles")
+                        .font(.headline)
+                    Text("Sign in to add an account, or import a profile backup.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Image(systemName: "person.crop.circle.badge.plus")
                         .font(.system(size: 22, weight: .medium))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity)
@@ -50,6 +63,19 @@ struct ContentView: View {
                 }
             }
             .padding(10)
+        }
+        .frame(minWidth: 420, minHeight: 300)
+        .safeAreaInset(edge: .top) {
+            if showSearch {
+                TextField("Search profiles", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($searchFocused)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+            }
+        }
+        .onChange(of: showSearch) { visible in
+            if visible { searchFocused = true } else { searchText = "" }
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .overlay {
@@ -62,84 +88,39 @@ struct ContentView: View {
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted, perform: handleDrop(providers:))
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                if model.isWorking {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-
-                Menu {
-                    Picker("Sort", selection: selectedSortOrder) {
-                        ForEach(SortOrder.allCases) { order in
-                            Text(order.rawValue).tag(order)
-                        }
-                    }
-                } label: {
-                    Image(systemName: "arrow.up.arrow.down.circle")
-                }
-                .help("Sort")
-
+                if model.isWorking { ProgressView().controlSize(.small) }
                 Button {
-                    model.reload()
+                    Task { await addCurrentProfile() }
                 } label: {
-                    Image(systemName: "arrow.clockwise")
+                    Label("Save Current Profile", systemImage: "person.crop.circle.badge.plus")
                 }
-                .keyboardShortcut("r", modifiers: [.command])
-                .help("Refresh")
-
+                .disabled(!model.currentProfile.isAvailable)
+                .help("Save current profile (⌘S)")
                 Button {
                     Task { await model.importProfileFromPanel() }
                 } label: {
-                    Image(systemName: "tray.and.arrow.down")
+                    Label("Import Profiles", systemImage: "square.and.arrow.down")
                 }
-                .keyboardShortcut("i", modifiers: [.command])
-                .help("Import Profile")
-
-                Menu {
-                    Button {
-                        Task { await addCurrentProfile() }
-                    } label: {
-                        Label("Save Current Codex", systemImage: "plus")
-                    }
-                    .keyboardShortcut("n", modifiers: [.command])
-
-                    Button {
-                        Task { await model.startBrowserLoginProfile() }
-                    } label: {
-                        Label("Sign In New Profile", systemImage: "globe")
-                    }
-                    .keyboardShortcut("n", modifiers: [.command, .shift])
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .help("Create Profile")
-
-                Menu {
-                    Button {
-                        Task { await model.importArchiveFromPanel() }
-                    } label: {
-                        Label("Import Backup", systemImage: "square.and.arrow.down.on.square")
-                    }
-                    .keyboardShortcut("i", modifiers: [.command, .shift])
-
-                    Button {
-                        Task { await model.exportAllProfiles() }
-                    } label: {
-                        Label("Export All", systemImage: "square.and.arrow.up.on.square")
-                    }
-                    .keyboardShortcut("e", modifiers: [.command, .shift])
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-                .help("Backup")
-
+                .help("Import profiles or backup (⌘I)")
                 Button {
                     Task { await model.logoutCodex() }
                 } label: {
-                    Image(systemName: "rectangle.portrait.and.arrow.right")
+                    Label("Sign Out Locally", systemImage: "rectangle.portrait.and.arrow.right")
                 }
-                .keyboardShortcut("l", modifiers: [.command, .shift])
-                .help("Logout")
+                .disabled(!model.currentProfile.isAvailable)
+                .help("Sign out locally, preserving the saved session")
             }
+        }
+        .disabled(model.isWorking)
+        .onReceive(NotificationCenter.default.publisher(for: .saveCurrentProfile)) { _ in
+            guard !model.isWorking, prompt == nil else { return }
+            Task { await addCurrentProfile() }
+        }
+        .sheet(isPresented: Binding(get: { sessionInfo != nil }, set: { if !$0 { sessionInfo = nil } })) {
+            SessionDetailsView(details: sessionInfo ?? "", close: { sessionInfo = nil }, signIn: {
+                sessionInfo = nil
+                Task { await model.startBrowserLoginProfile() }
+            })
         }
         .sheet(item: $prompt) { prompt in
             NamePromptView(
@@ -197,7 +178,9 @@ struct ContentView: View {
     }
 
     private var rows: [ProfileRow] {
-        model.rows(sortedBy: selectedSortOrder.wrappedValue)
+        model.rows(sortedBy: selectedSortOrder.wrappedValue).filter { row in
+            searchText.isEmpty || row.title.localizedCaseInsensitiveContains(searchText) || (!hideEmails && (row.email?.localizedCaseInsensitiveContains(searchText) ?? false))
+        }
     }
 
     private var selectedSortOrder: Binding<SortOrder> {
@@ -287,10 +270,15 @@ struct ContentView: View {
 
 private struct ProfileRowView: View {
     let row: ProfileRow
+    let hideEmails: Bool
+    @State private var confirmDelete = false
+    @State private var showProfileActions = false
     let renameAction: () -> Void
     let loadAction: () -> Void
     let deleteAction: () -> Void
     let exportAction: () -> Void
+    let detailsAction: () -> Void
+    let signInAction: () -> Void
     let addAction: () -> Void
 
     var body: some View {
@@ -302,7 +290,7 @@ private struct ProfileRowView: View {
 
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
-                    Text(row.title)
+                    Text(hideEmails && (row.title.contains("@") || row.title == row.email) ? "Profile" : row.title)
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
 
@@ -313,7 +301,7 @@ private struct ProfileRowView: View {
 
                 HStack(spacing: 8) {
                     if let email = row.email, showsSecondaryEmail {
-                        Text(email)
+                        Text(hideEmails ? "Email hidden" : email)
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -341,11 +329,34 @@ private struct ProfileRowView: View {
                 IconPill(symbol: "plus", action: addAction, help: "Save Current Profile")
             } else {
                 HStack(spacing: 6) {
-                    IconPill(symbol: "trash", action: deleteAction, help: "Delete Profile")
-                    IconPill(symbol: "square.and.arrow.up", action: exportAction, help: "Export Profile")
-                    IconPill(symbol: "arrow.down.circle", action: loadAction, help: "Load Profile")
+                    Button {
+                        showProfileActions = true
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Profile actions")
+                    .popover(isPresented: $showProfileActions, arrowEdge: .bottom) {
+                        ProfileActionsPopover(
+                            edit: renameAction,
+                            export: exportAction,
+                            details: detailsAction,
+                            signIn: signInAction,
+                            delete: { confirmDelete = true }
+                        )
+                    }
+                    IconPill(symbol: "arrow.left.arrow.right", action: loadAction,
+                             help: row.isCurrent ? "Current profile" : "Switch to this profile")
+                        .disabled(row.isCurrent)
                 }
             }
+        }
+        .alert("Delete saved profile?", isPresented: $confirmDelete) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive, action: deleteAction)
+        } message: {
+            Text("This removes the saved copy from this app. Your current ChatGPT session remains available.")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -443,6 +454,7 @@ private struct IconPill: View {
         .buttonStyle(.plain)
         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .help(help)
+        .accessibilityLabel(help)
     }
 }
 
@@ -498,16 +510,10 @@ private struct NamePromptView: View {
             HStack(spacing: 8) {
                 Spacer()
 
-                Button(action: cancelAction) {
-                    Image(systemName: "xmark")
-                        .frame(width: 28, height: 28)
-                }
+                Button("Cancel", action: cancelAction)
                 .keyboardShortcut(.cancelAction)
 
-                Button(action: confirmAction) {
-                    Image(systemName: "checkmark")
-                        .frame(width: 28, height: 28)
-                }
+                Button("Save", action: confirmAction)
                 .keyboardShortcut(.defaultAction)
             }
         }
@@ -556,10 +562,7 @@ private struct BrowserLoginView: View {
             HStack(spacing: 8) {
                 Spacer()
 
-                Button(action: cancelAction) {
-                    Image(systemName: "xmark")
-                        .frame(width: 28, height: 28)
-                }
+                Button("Cancel", action: cancelAction)
                 .keyboardShortcut(.cancelAction)
 
                 if state.authorizationURL != nil {
@@ -581,4 +584,59 @@ private enum CompactDateFormatter {
         formatter.dateFormat = "dd/MM HH:mm"
         return formatter
     }()
+}
+
+private struct ProfileActionsPopover: View {
+    let edit: () -> Void
+    let export: () -> Void
+    let details: () -> Void
+    let signIn: () -> Void
+    let delete: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            action("Edit Profile", symbol: "pencil", action: edit)
+            action("Export Profile", symbol: "square.and.arrow.up", action: export)
+            action("Session Details…", symbol: "info.circle", action: details)
+            action("Sign In Again…", symbol: "arrow.triangle.2.circlepath", action: signIn)
+            Divider().padding(.vertical, 4)
+            action("Delete Profile", symbol: "trash", role: .destructive, action: delete)
+        }
+        .padding(8)
+        .frame(width: 220)
+    }
+
+    private func action(
+        _ title: String,
+        symbol: String,
+        role: ButtonRole? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(role: role, action: action) {
+            Label(title, systemImage: symbol)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct SessionDetailsView: View {
+    let details: String
+    let close: () -> Void
+    let signIn: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Session Details").font(.headline)
+            Text(details).font(.callout).textSelection(.enabled)
+            HStack {
+                Button("Sign In Again…", action: signIn)
+                Spacer()
+                Button("Done", action: close).keyboardShortcut(.defaultAction)
+            }
+        }.padding(22).frame(width: 370)
+    }
 }

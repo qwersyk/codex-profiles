@@ -12,12 +12,19 @@ APP_DIR="$DIST_DIR/$APP_NAME.app"
 
 mkdir -p "$ASSETS_DIR" "$DIST_DIR"
 rm -rf "$ICONSET_DIR" "$ICON_PATH"
-swiftc -framework AppKit -o /tmp/codex_profiles_icon "$ROOT_DIR/Scripts/generate_icon.swift"
-/tmp/codex_profiles_icon "$ICONSET_DIR" "$ICON_PATH"
+SWIFT_BUILD_ARGS=()
+SWIFTC_ARGS=()
+if [[ -n "${CODEX_PROFILES_SDK:-}" ]]; then
+    SWIFT_BUILD_ARGS=(--sdk "$CODEX_PROFILES_SDK" --build-system native)
+    SWIFTC_ARGS=(-sdk "$CODEX_PROFILES_SDK")
+fi
+swiftc "${SWIFTC_ARGS[@]}" -framework AppKit -o "$ASSETS_DIR/icon-generator" "$ROOT_DIR/Scripts/generate_icon.swift"
+"$ASSETS_DIR/icon-generator" "$ICONSET_DIR" "$ICON_PATH"
+rm "$ASSETS_DIR/icon-generator"
 
 cd "$ROOT_DIR"
-swift build -c release --product "$EXEC_NAME"
-BIN_DIR="$(swift build -c release --show-bin-path)"
+swift build "${SWIFT_BUILD_ARGS[@]}" -c release --product "$EXEC_NAME"
+BIN_DIR="$(swift build "${SWIFT_BUILD_ARGS[@]}" -c release --show-bin-path)"
 
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
@@ -63,9 +70,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<'EOF'
     <key>NSHumanReadableCopyright</key>
     <string>qwersyk</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.3</string>
+    <string>1.5.2</string>
     <key>CFBundleVersion</key>
-    <string>4</string>
+    <string>8</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>

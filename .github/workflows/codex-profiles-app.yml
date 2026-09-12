@@ -1,46 +1,51 @@
-name: Codex Profiles Build
+name: Build and test
 
 on:
   workflow_dispatch:
   push:
   pull_request:
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 permissions:
   contents: read
 
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 jobs:
   build:
-    name: Build .app and .dmg
+    name: macOS app and regression tests
     runs-on: macos-26
-
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Swift version
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Toolchain
         run: swift --version
-
-      - name: Build app and dmg
+      - name: Test profile storage
+        run: ./Scripts/test.sh
+      - name: Build and verify
+        run: |
+          ./Scripts/build_dmg.sh
+          codesign --verify --deep --strict 'dist/Codex Profiles.app'
+          hdiutil verify 'dist/Codex Profiles.dmg'
+      - name: Package app with executable permissions
+        id: package
         shell: bash
         run: |
-          chmod +x Scripts/build_app.sh Scripts/build_dmg.sh
-          ./Scripts/build_dmg.sh
-          ls -la dist
-
-      - name: Upload app
-        uses: actions/upload-artifact@v4
+          arch="$(uname -m)"
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+          ditto -c -k --sequesterRsrc --keepParent 'dist/Codex Profiles.app' "dist/Codex-Profiles-$arch.app.zip"
+          mv 'dist/Codex Profiles.dmg' "dist/Codex-Profiles-$arch.dmg"
+          cd dist
+          shasum -a 256 *.app.zip *.dmg > SHA256SUMS.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: Codex-Profiles-app
+          name: Codex-Profiles-${{ steps.package.outputs.arch }}
           if-no-files-found: error
           retention-days: 14
-          path: "dist/Codex Profiles.app"
-
-      - name: Upload dmg
-        uses: actions/upload-artifact@v4
-        with:
-          name: Codex-Profiles-dmg
-          if-no-files-found: error
-          retention-days: 14
-          path: "dist/Codex Profiles.dmg"
+          path: |
+            dist/*.app.zip
+            dist/*.dmg
+            dist/SHA256SUMS.txt

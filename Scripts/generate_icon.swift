@@ -19,10 +19,6 @@ let variants: [(name: String, size: Int)] = [
     ("icon_512x512.png", 512),
     ("icon_512x512@2x.png", 1024),
 ]
-let background = NSColor(calibratedRed: 0.10, green: 0.11, blue: 0.13, alpha: 1.0)
-let card = NSColor(calibratedRed: 0.94, green: 0.95, blue: 0.97, alpha: 1.0)
-let shadow = NSColor(calibratedRed: 0.18, green: 0.19, blue: 0.22, alpha: 1.0)
-let accent = NSColor(calibratedRed: 0.43, green: 0.58, blue: 0.87, alpha: 1.0)
 
 for variant in variants {
     let size = variant.size
@@ -49,83 +45,52 @@ for variant in variants {
     }
     NSGraphicsContext.current = context
 
-    let frame = NSRect(x: 0, y: 0, width: size, height: size)
-    let corner = CGFloat(size) * 0.23
-    let shell = NSBezierPath(roundedRect: frame, xRadius: corner, yRadius: corner)
-    background.setFill()
+    let unit = CGFloat(size)
+    func rect(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) -> NSRect {
+        NSRect(x: x * unit, y: y * unit, width: w * unit, height: h * unit)
+    }
+    func rounded(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat, radius: CGFloat) -> NSBezierPath {
+        NSBezierPath(roundedRect: rect(x, y, w, h), xRadius: radius * unit, yRadius: radius * unit)
+    }
+    let shell = rounded(0.055, 0.055, 0.89, 0.89, radius: 0.205)
+    NSGraphicsContext.saveGraphicsState()
+    let dropShadow = NSShadow()
+    dropShadow.shadowColor = NSColor.black.withAlphaComponent(0.25)
+    dropShadow.shadowBlurRadius = unit * 0.035
+    dropShadow.shadowOffset = NSSize(width: 0, height: -unit * 0.014)
+    dropShadow.set()
+    NSColor(calibratedRed: 0.12, green: 0.16, blue: 0.18, alpha: 1).setFill()
     shell.fill()
+    NSGraphicsContext.restoreGraphicsState()
+    NSGradient(colors: [
+        NSColor(calibratedRed: 0.24, green: 0.30, blue: 0.32, alpha: 1),
+        NSColor(calibratedRed: 0.10, green: 0.14, blue: 0.16, alpha: 1)
+    ])!.draw(in: shell, angle: -65)
+    NSColor.white.withAlphaComponent(0.12).setStroke()
+    shell.lineWidth = max(0.5, unit * 0.002)
+    shell.stroke()
 
-    let backCard = NSBezierPath(
-        roundedRect: NSRect(
-            x: CGFloat(size) * 0.22,
-            y: CGFloat(size) * 0.21,
-            width: CGFloat(size) * 0.43,
-            height: CGFloat(size) * 0.48
-        ),
-        xRadius: CGFloat(size) * 0.08,
-        yRadius: CGFloat(size) * 0.08
-    )
-    shadow.setFill()
-    backCard.fill()
-
-    let frontCard = NSBezierPath(
-        roundedRect: NSRect(
-            x: CGFloat(size) * 0.35,
-            y: CGFloat(size) * 0.31,
-            width: CGFloat(size) * 0.43,
-            height: CGFloat(size) * 0.48
-        ),
-        xRadius: CGFloat(size) * 0.08,
-        yRadius: CGFloat(size) * 0.08
-    )
-    card.setFill()
-    frontCard.fill()
-
-    let avatar = NSBezierPath(
-        ovalIn: NSRect(
-            x: CGFloat(size) * 0.46,
-            y: CGFloat(size) * 0.56,
-            width: CGFloat(size) * 0.14,
-            height: CGFloat(size) * 0.14
-        )
-    )
-    background.setFill()
-    avatar.fill()
-
-    let line1 = NSBezierPath(
-        roundedRect: NSRect(
-            x: CGFloat(size) * 0.45,
-            y: CGFloat(size) * 0.47,
-            width: CGFloat(size) * 0.24,
-            height: CGFloat(size) * 0.045
-        ),
-        xRadius: CGFloat(size) * 0.02,
-        yRadius: CGFloat(size) * 0.02
-    )
-    let line2 = NSBezierPath(
-        roundedRect: NSRect(
-            x: CGFloat(size) * 0.45,
-            y: CGFloat(size) * 0.40,
-            width: CGFloat(size) * 0.18,
-            height: CGFloat(size) * 0.045
-        ),
-        xRadius: CGFloat(size) * 0.02,
-        yRadius: CGFloat(size) * 0.02
-    )
-    shadow.setFill()
-    line1.fill()
-    line2.fill()
-
-    let dot = NSBezierPath(
-        ovalIn: NSRect(
-            x: CGFloat(size) * 0.66,
-            y: CGFloat(size) * 0.18,
-            width: CGFloat(size) * 0.12,
-            height: CGFloat(size) * 0.12
-        )
-    )
-    accent.setFill()
-    dot.fill()
+    func accountCard(x: CGFloat, y: CGFloat, fill: NSColor, ink: NSColor) {
+        let path = rounded(x, y, 0.36, 0.43, radius: 0.065)
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor(calibratedRed: 0.02, green: 0.06, blue: 0.07, alpha: 0.25)
+        shadow.shadowBlurRadius = unit * 0.022
+        shadow.shadowOffset = NSSize(width: 0, height: -unit * 0.012)
+        shadow.set()
+        fill.setFill()
+        path.fill()
+        NSGraphicsContext.restoreGraphicsState()
+        ink.setFill()
+        NSBezierPath(ovalIn: rect(x + 0.126, y + 0.245, 0.108, 0.108)).fill()
+        rounded(x + 0.074, y + 0.09, 0.212, 0.12, radius: 0.06).fill()
+    }
+    accountCard(x: 0.205, y: 0.3375,
+                fill: NSColor(calibratedRed: 0.43, green: 0.68, blue: 0.65, alpha: 1),
+                ink: NSColor(calibratedRed: 0.15, green: 0.37, blue: 0.36, alpha: 1))
+    accountCard(x: 0.435, y: 0.2325,
+                fill: NSColor(calibratedWhite: 0.96, alpha: 1),
+                ink: NSColor(calibratedRed: 0.19, green: 0.48, blue: 0.45, alpha: 1))
 
     NSGraphicsContext.restoreGraphicsState()
 
