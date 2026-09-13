@@ -11,6 +11,8 @@ struct SavedProfile: Codable, Identifiable, Equatable {
     var avatarColorToken: String?
     let createdAt: Date
     var lastLoadedAt: Date?
+    var lastRenewalAttemptAt: Date?
+    var renewalStatus: String?
 
     var displayName: String {
         if let customName = customName?.trimmingCharacters(in: .whitespacesAndNewlines), !customName.isEmpty {
@@ -39,6 +41,7 @@ struct ProfileRow: Identifiable, Equatable {
     let lastLoadedAt: Date?
     let isCurrent: Bool
     let isUnsavedCurrent: Bool
+    var plan: String? = nil
 }
 
 enum SortOrder: String, CaseIterable, Identifiable {
@@ -143,6 +146,38 @@ final class AppModel: ObservableObject {
         return store.sessionDetails(id: id)
     }
 
+    func canRenew(_ row: ProfileRow) -> Bool {
+        guard let id = row.profileID else { return false }
+        return (try? store.renewalHome(id: id)) != nil
+    }
+
+    func renewSession(id: UUID, automatically: Bool = false) async {
+        guard !isWorking else { return }
+        isWorking = true
+        defer { isWorking = false }
+        do {
+            let executable = try codexCLIURL()
+            let home = try store.renewalHome(id: id)
+            let before = try Data(contentsOf: home.appendingPathComponent("auth.json"))
+            try store.recordRenewal(id: id, status: "Renewal started.")
+            try await SessionRenewal.renew(executable: executable, home: home)
+            try store.completeRenewal(id: id, previous: before)
+        } catch {
+            // Do not restore old credentials: a request can rotate tokens before failing.
+            let message = (error as? SessionRenewalError)?.localizedDescription
+                ?? "Session renewal could not finish. Check that ChatGPT is installed and try again."
+            try? store.recordRenewal(id: id, status: message)
+            if !automatically { errorMessage = message }
+        }
+        reload()
+    }
+
+    func renewInactiveSessionIfNeeded() async {
+        guard !isWorking, UserDefaults.standard.bool(forKey: "renew_inactive_sessions"),
+              let id = store.nextRenewalID() else { return }
+        await renewSession(id: id, automatically: true)
+    }
+
     func rows(sortedBy sortOrder: SortOrder) -> [ProfileRow] {
         let currentID = store.currentSavedProfileID()
         let savedRows = sortedProfiles(by: sortOrder).map { profile in
@@ -156,7 +191,8 @@ final class AppModel: ObservableObject {
                 createdAt: profile.createdAt,
                 lastLoadedAt: profile.lastLoadedAt,
                 isCurrent: currentID == profile.id,
-                isUnsavedCurrent: false
+                isUnsavedCurrent: false,
+                plan: store.sessionMetadata(id: profile.id)?.plan
             )
         }
 
@@ -1003,6 +1039,9 @@ final class ProfileStore {
         let tokens = json["tokens"] as? [String: Any]
         let payload = decodePayload(token: tokens?["access_token"] as? String)
         var lines: [String] = []
+        if let plan = SessionMetadata(data: data).plan {
+            lines.append("Plan: " + plan + " (saved account information)")
+        }
         if let seconds = payload?["exp"] as? Double {
             let expiry = Date(timeIntervalSince1970: seconds)
             lines.append("Access token expires: " + expiry.formatted(date: .abbreviated, time: .shortened))
@@ -1011,11 +1050,69 @@ final class ProfileStore {
         if let refreshed = credentialDate(data) {
             lines.append("Last credential update: " + refreshed.formatted(date: .abbreviated, time: .shortened))
         }
+        if let profile = (try? loadProfiles())?.first(where: { $0.id == id }),
+           let attempted = profile.lastRenewalAttemptAt, let status = profile.renewalStatus {
+            lines.append("Renewal: " + attempted.formatted(date: .abbreviated, time: .shortened) + "\n" + status)
+        }
         if normalized(tokens?["refresh_token"] as? String) == nil {
             lines.append("No refresh token is saved. A new browser sign-in may be required.")
         }
-        lines.append("Server validity has not been checked. Revoked or already-used refresh tokens cannot be repaired from a backup. Sign in again using the same account to update its saved profile.")
+        lines.append("Token expiry is not the subscription end date. Billing dates are unavailable here.")
+        lines.append("Server validity has not been checked for this view. Revoked or already-used refresh tokens require a new sign-in.")
         return lines.joined(separator: "\n\n")
+    }
+
+    func sessionMetadata(id: UUID) -> SessionMetadata? {
+        guard let url = try? existingAuthURL(for: id), let data = try? Data(contentsOf: url) else { return nil }
+        return SessionMetadata(data: data)
+    }
+
+    func renewalHome(id: UUID) throws -> URL {
+        try validateFileStorage()
+        let url = try existingAuthURL(for: id)
+        let data = try Data(contentsOf: url)
+        let metadata = SessionMetadata(data: data)
+        guard metadata.isManaged else { throw SessionRenewalError.unavailable }
+        if let current = try? Data(contentsOf: authURL),
+           (authIdentity(current) == authIdentity(data) || SessionMetadata(data: current).refreshToken == metadata.refreshToken) {
+            throw SessionRenewalError.active
+        }
+        for profile in try loadProfiles() where profile.id != id {
+            if sessionMetadata(id: profile.id)?.refreshToken == metadata.refreshToken {
+                throw SessionRenewalError.shared
+            }
+        }
+        return url.deletingLastPathComponent()
+    }
+
+    func nextRenewalID(now: Date = Date()) -> UUID? {
+        guard let profiles = try? loadProfiles() else { return nil }
+        return profiles.first { profile in
+            sessionMetadata(id: profile.id)?.needsRenewal(now: now, lastAttempt: profile.lastRenewalAttemptAt) == true
+                && (try? renewalHome(id: profile.id)) != nil
+        }?.id
+    }
+
+    func recordRenewal(id: UUID, status: String, now: Date = Date()) throws {
+        var profiles = try loadProfiles()
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else { throw SessionRenewalError.unavailable }
+        profiles[index].lastRenewalAttemptAt = now
+        profiles[index].renewalStatus = status
+        try save(profiles)
+    }
+
+    func completeRenewal(id: UUID, previous: Data) throws {
+        let url = try existingAuthURL(for: id)
+        let renewed = try Data(contentsOf: url)
+        // A successful RPC alone does not prove that tokens were actually refreshed.
+        guard renewed != previous, isCodexAuth(renewed), authIdentity(renewed) == authIdentity(previous),
+              let expiry = SessionMetadata(data: renewed).expiresAt, expiry > Date(),
+              credentialDate(renewed) != credentialDate(previous)
+                || SessionMetadata(data: renewed).expiresAt != SessionMetadata(data: previous).expiresAt else {
+            throw SessionRenewalError.unchanged
+        }
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        try recordRenewal(id: id, status: "Session renewed. This does not extend the subscription.")
     }
 
     private func credentialDate(_ data: Data) -> Date? {

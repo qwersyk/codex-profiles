@@ -8,5 +8,7 @@ if [[ -n "${CODEX_PROFILES_SDK:-}" ]]; then
 fi
 swiftc "${SDK_ARGS[@]}" -o "$ROOT_DIR/.build/tests/profile-tests" \
     "$ROOT_DIR/Sources/CodexProfilesApp/AppModel.swift" \
-    "$ROOT_DIR/Tests/CodexProfilesTests/ProfileStoreTests.swift"
+    "$ROOT_DIR/Sources/CodexProfilesApp/SessionRenewal.swift" \
+    "$ROOT_DIR/Tests/CodexProfilesTests/ProfileStoreTests.swift" \
+    "$ROOT_DIR/Tests/CodexProfilesTests/SessionRenewalTests.swift"
 "$ROOT_DIR/.build/tests/profile-tests"

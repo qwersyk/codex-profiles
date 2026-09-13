@@ -7,7 +7,7 @@ struct ContentView: View {
     @AppStorage("hide_emails") private var hideEmails = false
     @State private var searchText = ""
     @AppStorage("show_search") private var showSearch = false
-    @State private var sessionInfo: String?
+    @State private var sessionRow: ProfileRow?
     @FocusState private var searchFocused: Bool
     @AppStorage("sort_order") private var sortOrderRaw = SortOrder.recent.rawValue
     @State private var prompt: NamePrompt?
@@ -41,7 +41,7 @@ struct ContentView: View {
                         exportAction: {
                             Task { await model.exportProfile(row) }
                         },
-                        detailsAction: { sessionInfo = model.sessionDetails(for: row) },
+                        detailsAction: { sessionRow = row },
                         signInAction: { Task { await model.startBrowserLoginProfile() } },
                         addAction: {
                             Task { await addCurrentProfile() }
@@ -90,9 +90,15 @@ struct ContentView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 if model.isWorking { ProgressView().controlSize(.small) }
                 Button {
+                    Task { await model.startBrowserLoginProfile() }
+                } label: {
+                    Label("Sign In New Profile", systemImage: "person.crop.circle.badge.plus")
+                }
+                .help("Add account with browser sign-in (⇧⌘N)")
+                Button {
                     Task { await addCurrentProfile() }
                 } label: {
-                    Label("Save Current Profile", systemImage: "person.crop.circle.badge.plus")
+                    Label("Save Current Profile", systemImage: "tray.and.arrow.down")
                 }
                 .disabled(!model.currentProfile.isAvailable)
                 .help("Save current profile (⌘S)")
@@ -116,9 +122,9 @@ struct ContentView: View {
             guard !model.isWorking, prompt == nil else { return }
             Task { await addCurrentProfile() }
         }
-        .sheet(isPresented: Binding(get: { sessionInfo != nil }, set: { if !$0 { sessionInfo = nil } })) {
-            SessionDetailsView(details: sessionInfo ?? "", close: { sessionInfo = nil }, signIn: {
-                sessionInfo = nil
+        .sheet(item: $sessionRow) { row in
+            SessionDetailsView(model: model, row: row, close: { sessionRow = nil }, signIn: {
+                sessionRow = nil
                 Task { await model.startBrowserLoginProfile() }
             })
         }
@@ -297,6 +303,16 @@ private struct ProfileRowView: View {
                     if !row.isUnsavedCurrent && !showsSecondaryEmail {
                         editButton
                     }
+                    if let plan = row.plan {
+                        Text(plan)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(plan == "Free" ? Color.secondary : Color.accentColor)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background((plan == "Free" ? Color.secondary : Color.accentColor).opacity(0.1), in: Capsule())
+                            .fixedSize()
+                            .help("Plan from saved account information")
+                    }
                 }
 
                 HStack(spacing: 8) {
@@ -339,14 +355,14 @@ private struct ProfileRowView: View {
                     .help("Profile actions")
                     .popover(isPresented: $showProfileActions, arrowEdge: .bottom) {
                         ProfileActionsPopover(
-                            edit: renameAction,
-                            export: exportAction,
-                            details: detailsAction,
-                            signIn: signInAction,
-                            delete: { confirmDelete = true }
+                            edit: { performProfileAction(renameAction) },
+                            export: { performProfileAction(exportAction) },
+                            details: { performProfileAction(detailsAction) },
+                            signIn: { performProfileAction(signInAction) },
+                            delete: { performProfileAction { confirmDelete = true } }
                         )
                     }
-                    IconPill(symbol: "arrow.left.arrow.right", action: loadAction,
+                    IconPill(symbol: row.isCurrent ? "checkmark" : "arrow.left.arrow.right", action: loadAction,
                              help: row.isCurrent ? "Current profile" : "Switch to this profile")
                         .disabled(row.isCurrent)
                 }
@@ -372,6 +388,11 @@ private struct ProfileRowView: View {
             return Color.accentColor.opacity(row.isUnsavedCurrent ? 0.05 : 0.09)
         }
         return Color(nsColor: .controlBackgroundColor)
+    }
+
+    private func performProfileAction(_ action: @escaping () -> Void) {
+        showProfileActions = false
+        DispatchQueue.main.async { action() }
     }
 
     private var border: Color {
@@ -624,16 +645,25 @@ private struct ProfileActionsPopover: View {
 }
 
 private struct SessionDetailsView: View {
-    let details: String
+    @ObservedObject var model: AppModel
+    let row: ProfileRow
     let close: () -> Void
     let signIn: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Session Details").font(.headline)
-            Text(details).font(.callout).textSelection(.enabled)
+            Text(model.sessionDetails(for: row)).font(.callout).textSelection(.enabled)
+            if model.canRenew(row), let id = row.profileID {
+                HStack {
+                    Button("Renew Session") { Task { await model.renewSession(id: id) } }
+                        .disabled(model.isWorking)
+                    if model.isWorking { ProgressView().controlSize(.small) }
+                }
+            }
             HStack {
                 Button("Sign In Again…", action: signIn)
+                    .disabled(model.isWorking)
                 Spacer()
                 Button("Done", action: close).keyboardShortcut(.defaultAction)
             }

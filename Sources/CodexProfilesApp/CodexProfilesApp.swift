@@ -5,6 +5,7 @@ struct CodexProfilesApp: App {
     @StateObject private var model = AppModel()
     @AppStorage("hide_emails") private var hideEmails = false
     @AppStorage("show_search") private var showSearch = false
+    @AppStorage("renew_inactive_sessions") private var renewInactiveSessions = false
     @AppStorage("sort_order") private var sortOrderRaw = SortOrder.recent.rawValue
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
@@ -21,6 +22,7 @@ struct CodexProfilesApp: App {
                     while !Task.isCancelled {
                         do { try await Task.sleep(nanoseconds: 10_000_000_000) } catch { break }
                         model.synchronizeSavedSession()
+                        await model.renewInactiveSessionIfNeeded()
                     }
                 }
         }
@@ -57,6 +59,8 @@ struct CodexProfilesApp: App {
                     .keyboardShortcut("e", modifiers: [.command, .shift])
                     .disabled(model.isWorking)
                 Divider()
+                Toggle("Renew Inactive Sessions Automatically", isOn: $renewInactiveSessions)
+                    .help("While this app is open, renew inactive sessions within one day of token expiry. Does not extend subscriptions.")
                 Button("Refresh") { model.reload() }
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(model.isWorking)

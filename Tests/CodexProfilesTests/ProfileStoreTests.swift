@@ -146,7 +146,8 @@ final class ProfileStoreTests {
 
 @main
 struct TestRunner {
-    static func main() throws {
+    @MainActor
+    static func main() async throws {
         let suite = ProfileStoreTests()
         let tests: [(String, () throws -> Void)] = [
             ("Archive round trip", suite.testArchiveRoundTrip),
@@ -176,5 +177,6 @@ struct TestRunner {
             try suite.tearDownWithError()
             print("PASS: \(name)")
         }
+        try await SessionRenewalTests.run()
     }
 }
