@@ -79,7 +79,7 @@ struct CodexProfilesApp: App {
                     .disabled(model.isWorking)
                 Divider()
                 Menu("Switch to Profile") {
-                    ForEach(model.rows(sortedBy: .created).filter { $0.profileID != nil }.reversed()) { row in
+                    ForEach(model.rows(sortedBy: SortOrder(rawValue: sortOrderRaw) ?? .recent).filter { $0.profileID != nil }) { row in
                         if let number = row.shortcutNumber {
                             Button(shortcutTitle(row)) { Task { await model.loadProfile(row) } }
                                 .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: .command)
@@ -104,11 +104,12 @@ struct CodexProfilesApp: App {
 
 private struct ProfileMenuBarView: View {
     @ObservedObject var model: AppModel
+    @AppStorage("sort_order") private var sortOrderRaw = SortOrder.recent.rawValue
     @AppStorage("hide_emails") private var hideEmails = false
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Codex Profiles").font(.headline)
                 Spacer()
@@ -120,11 +121,11 @@ private struct ProfileMenuBarView: View {
             if model.profiles.isEmpty { Text("Save a profile in the main window.").foregroundStyle(.secondary) }
             ScrollView {
                 VStack(spacing: 4) {
-                    ForEach(model.rows(sortedBy: .created).filter { $0.profileID != nil }) { row in
+                    ForEach(model.rows(sortedBy: SortOrder(rawValue: sortOrderRaw) ?? .recent).filter { $0.profileID != nil }) { row in
                         Button { Task { await model.loadProfile(row) } } label: {
                             HStack(spacing: 10) {
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(hideEmails && row.title.contains("@") ? "Profile " + String((model.rows(sortedBy: .created).firstIndex(where: { $0.id == row.id }) ?? 0) + 1) : row.title)
+                                    Text(hideEmails && row.title.contains("@") ? "Profile " + String((model.rows(sortedBy: SortOrder(rawValue: sortOrderRaw) ?? .recent).firstIndex(where: { $0.id == row.id }) ?? 0) + 1) : row.title)
                                         .font(.subheadline.weight(.medium)).lineLimit(1)
                                     if let usage = row.usage, !usage.indicatorWindows.isEmpty {
                                         Text(usage.indicatorWindows.map { "\($0.durationLabel) · \(Int($0.remainingPercent))% left" }.joined(separator: "   ") + (usage.isStale ? " · cached" : ""))
@@ -136,20 +137,21 @@ private struct ProfileMenuBarView: View {
                                 if let number = row.shortcutNumber {
                                     Text("⌘\(number)").font(.caption2).foregroundStyle(.tertiary)
                                 }
-                                Image(systemName: row.isSwitching ? "ellipsis" : row.isCurrent ? "checkmark" : "arrow.right")
-                                    .foregroundStyle(row.usage?.indicatorWindows.first.map { quotaColor($0.remainingPercent) } ?? .secondary)
+                                if row.isSwitching {
+                                    ProgressView().controlSize(.mini).frame(width: 12, height: 12)
+                                }
                             }
-                            .padding(9).contentShape(Rectangle())
+                            .padding(.horizontal, 8).padding(.vertical, 6).contentShape(Rectangle())
                             .background(row.isCurrent ? Color.accentColor.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 8))
                         }
-                        .buttonStyle(.plain).disabled(model.isWorking || row.isCurrent)
+                        .buttonStyle(.plain).disabled(model.isWorking)
                         .help(row.isCurrent ? "Current profile" : "Switch and restart ChatGPT")
                     }
                 }
             }
             // A menu-bar popover proposes an unconstrained height. A ScrollView's
             // intrinsic height is zero, so provide a concrete viewport for its rows.
-            .frame(height: min(320, CGFloat(model.profiles.count) * 64))
+            .frame(height: min(300, CGFloat(model.profiles.count) * 48))
             if model.switchingProfileID != nil { Text("Switching · restarting ChatGPT…").font(.caption).foregroundStyle(.secondary) }
             if let error = model.errorMessage { Text(error).font(.caption).foregroundStyle(.red).lineLimit(3) }
             Divider()
@@ -159,7 +161,7 @@ private struct ProfileMenuBarView: View {
                 Button("Quit") { NSApp.terminate(nil) }.disabled(model.isWorking)
             }
         }
-        .padding(14).frame(width: 300)
+        .padding(12).frame(width: 270)
         .onAppear { model.startMaintenance(); if !model.isWorking { model.reload(); model.refreshUsage(all: true) } }
     }
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.12
+- Match menu bar ordering and ⌘0–9 shortcuts to the selected sort order.
+- Compact the menu bar panel and move reset badges beside account plans.
+
 ## 1.11
 - Fix the collapsed menu bar profile list.
 - Add direct ⌘1–9 profile shortcuts and compact reset-count badges.

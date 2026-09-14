@@ -335,6 +335,7 @@ private struct ProfileRowView: View {
                             .fixedSize()
                             .help("Plan from saved account information")
                     }
+                    ResetBadge(count: row.usage?.availableResets)
                     if let warning = row.renewalWarning {
                         Button(action: detailsAction) {
                             Image(systemName: "exclamationmark.circle")
@@ -391,7 +392,6 @@ private struct ProfileRowView: View {
                         .init(title: "Delete Profile…", symbol: "trash", enabled: !isBusy, action: { confirmDelete = true })
                     ])
                     .frame(width: 28, height: 28)
-                    ResetBadge(count: row.usage?.availableResets)
                     QuotaSwitch(row: row, isBusy: isBusy, action: loadAction)
                 }
             }
@@ -494,10 +494,10 @@ struct ResetBadge: View {
             Text(String(count))
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.orange)
                 .padding(.horizontal, 5).frame(minWidth: 18, minHeight: 18)
-                .background(Color.primary.opacity(0.05), in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
+                .background(Color.orange.opacity(0.09), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.orange.opacity(0.25), lineWidth: 1))
                 .fixedSize()
                 .help("Available limit resets: \(count)")
                 .accessibilityLabel("\(count) available limit resets")
