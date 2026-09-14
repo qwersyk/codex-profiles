@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.10
+- Add an optional menu bar panel for switching profiles and checking limits.
+- Clarify switching progress; use clockwise quota outlines and remaining-based colors.
+
 ## 1.9
 - Show cached quota indicators on profile buttons with automatic background updates.
 - Add keyboard profile switching, refresh-all, and available reset counts.

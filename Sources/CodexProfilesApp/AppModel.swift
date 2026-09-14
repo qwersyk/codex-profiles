@@ -47,6 +47,7 @@ struct ProfileRow: Identifiable, Equatable {
     var plan: String? = nil
     var renewalWarning: String? = nil
     var usage: UsageSnapshot? = nil
+    var isSwitching = false
 }
 
 enum SortOrder: String, CaseIterable, Identifiable {
@@ -175,6 +176,20 @@ final class AppModel: ObservableObject {
 
     private let store = ProfileStore()
     private var loginController: CodexLoginController?
+    @Published private(set) var switchingProfileID: UUID?
+    private var maintenanceTask: Task<Void, Never>?
+
+    func startMaintenance() {
+        guard maintenanceTask == nil else { return }
+        maintenanceTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.synchronizeSavedSession()
+                await self?.renewInactiveSessionIfNeeded()
+                self?.refreshUsage(all: true)
+                do { try await Task.sleep(nanoseconds: 10_000_000_000) } catch { break }
+            }
+        }
+    }
 
     init() {
         reload()
@@ -291,7 +306,8 @@ final class AppModel: ObservableObject {
                 plan: store.sessionMetadata(id: profile.id)?.plan,
                 renewalWarning: profile.renewalRequiresSignIn == true ? "Sign in again to reconnect this profile."
                     : (profile.renewalFailed == true ? profile.renewalStatus : nil),
-                usage: profile.usage
+                usage: profile.usage,
+                isSwitching: switchingProfileID == profile.id
             )
         }
 
@@ -400,6 +416,8 @@ final class AppModel: ObservableObject {
 
     func loadProfile(_ row: ProfileRow) async {
         guard let id = row.profileID, !row.isCurrent, !isWorking else { return }
+        switchingProfileID = id
+        defer { switchingProfileID = nil }
         let outgoing = store.currentSavedProfileID()
         await runTask {
             try self.store.validateRestore(id: id)
@@ -1205,7 +1223,7 @@ final class ProfileStore {
             return "Automatic renewal cannot be scheduled without a token expiry date. Manual renewal is available."
         }
         let when = date <= now ? "Due now" : date.formatted(date: .abbreviated, time: .shortened)
-        return "Next automatic attempt: " + when + ". While this window is open; retries are at least one day apart."
+        return "Next automatic attempt: " + when + ". While this app is running; retries are at least one day apart."
     }
 
     func nextRenewalID(now: Date = Date(), leadDays: Int = 1) -> UUID? {

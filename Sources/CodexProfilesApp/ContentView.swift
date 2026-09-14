@@ -95,7 +95,6 @@ struct ContentView: View {
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted, perform: handleDrop(providers:))
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                if model.isWorking || !model.loadingUsage.isEmpty { ProgressView().controlSize(.small) }
                 Button {
                     Task { await model.startBrowserLoginProfile() }
                 } label: {
@@ -124,6 +123,18 @@ struct ContentView: View {
                 }
                 .disabled(model.isWorking || !model.currentProfile.isAvailable)
                 .help("Sign out locally, preserving the saved session")
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if model.isWorking || !model.loadingUsage.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.mini).frame(width: 12, height: 12)
+                    Text(model.switchingProfileID != nil ? "Switching profile · restarting ChatGPT…" : model.isWorking ? "Working…" : "Updating limits…")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .background(.bar)
             }
         }
         .disabled(model.isWorking && !model.isRenewingSession)
@@ -469,14 +480,37 @@ private struct MetaChip: View {
     }
 }
 
-private struct QuotaSwitch: View {
+func quotaColor(_ remaining: Double) -> Color {
+    remaining <= 10 ? .red : remaining <= 30 ? .orange : .green
+}
+
+// Start at twelve o'clock and follow the perimeter clockwise.
+private struct ClockwiseQuotaBorder: Shape {
+    func path(in rect: CGRect) -> Path {
+        let r: CGFloat = min(9, min(rect.width, rect.height) / 2)
+        var path = Path()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX - r, y: rect.minY))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY + r), control: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - r))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX - r, y: rect.maxY), control: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX + r, y: rect.maxY))
+        path.addQuadCurve(to: CGPoint(x: rect.minX, y: rect.maxY - r), control: CGPoint(x: rect.minX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.minY + r))
+        path.addQuadCurve(to: CGPoint(x: rect.minX + r, y: rect.minY), control: CGPoint(x: rect.minX, y: rect.minY))
+        path.closeSubpath()
+        return path
+    }
+}
+
+struct QuotaSwitch: View {
     let row: ProfileRow
     let isBusy: Bool
     let action: () -> Void
 
     private var windows: [UsageWindow] { row.usage?.indicatorWindows ?? [] }
     private var hint: String {
-        var text = row.isCurrent ? "Current profile" : "Switch to this profile"
+        var text = row.isSwitching ? "Switching profile…" : row.isCurrent ? "Current profile" : "Switch to this profile (restarts ChatGPT)"
         for window in windows { text += "\n\(window.durationLabel): \(Int(window.remainingPercent))% remaining" }
         if let usage = row.usage {
             text += "\nUpdated \(usage.fetchedAt.formatted(date: .abbreviated, time: .shortened))"
@@ -491,10 +525,10 @@ private struct QuotaSwitch: View {
             ZStack(alignment: .bottom) {
                 RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.08))
                 if let first = windows.first {
-                    Color.accentColor.opacity(row.usage?.isStale == true ? 0.2 : 0.45)
+                    quotaColor(first.remainingPercent).opacity(row.usage?.isStale == true ? 0.2 : 0.4)
                         .frame(height: 32 * first.remainingPercent / 100)
                 }
-                Image(systemName: row.isCurrent ? "checkmark" : "arrow.left.arrow.right")
+                Image(systemName: row.isSwitching ? "ellipsis" : row.isCurrent ? "checkmark" : "arrow.right")
                     .font(.system(size: 13, weight: .semibold))
                     .frame(width: 32, height: 32)
             }
@@ -503,8 +537,8 @@ private struct QuotaSwitch: View {
             .overlay {
                 if windows.count > 1, let last = windows.last {
                     RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.12), lineWidth: 2)
-                    RoundedRectangle(cornerRadius: 9).trim(from: 0, to: last.remainingPercent / 100)
-                        .stroke(Color.accentColor.opacity(row.usage?.isStale == true ? 0.35 : 1), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    ClockwiseQuotaBorder().trim(from: 0, to: last.remainingPercent / 100)
+                        .stroke(quotaColor(last.remainingPercent).opacity(row.usage?.isStale == true ? 0.35 : 1), style: StrokeStyle(lineWidth: 2, lineCap: .round))
                 }
             }
         }

@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct CodexProfilesApp: App {
     @StateObject private var model = AppModel()
+    @AppStorage("show_menu_bar") private var showMenuBar = false
     @AppStorage("hide_emails") private var hideEmails = false
     @AppStorage("show_search") private var showSearch = false
     @AppStorage("renew_inactive_sessions") private var renewInactiveSessions = true
@@ -20,13 +21,7 @@ struct CodexProfilesApp: App {
                     appDelegate.setOpenHandler { urls in
                         Task { await model.importFiles(urls) }
                     }
-                    model.refreshUsage(all: true)
-                    while !Task.isCancelled {
-                        do { try await Task.sleep(nanoseconds: 10_000_000_000) } catch { break }
-                        model.synchronizeSavedSession()
-                        await model.renewInactiveSessionIfNeeded()
-                        model.refreshUsage(all: true)
-                    }
+                    model.startMaintenance()
                 }
         }
         .defaultSize(width: 560, height: 430)
@@ -40,6 +35,7 @@ struct CodexProfilesApp: App {
                 .disabled(model.isWorking || !model.currentProfile.isAvailable)
             }
             CommandGroup(after: .toolbar) {
+                Toggle("Show in Menu Bar", isOn: $showMenuBar)
                 Toggle("Hide Email Addresses", isOn: $hideEmails)
                     .keyboardShortcut("h", modifiers: [.command, .shift])
                 Toggle("Show Search", isOn: $showSearch)
@@ -63,7 +59,7 @@ struct CodexProfilesApp: App {
                     .disabled(model.isWorking)
                 Divider()
                 Toggle("Renew Inactive Sessions Automatically", isOn: $renewInactiveSessions)
-                    .help("Renew inactive sessions while this window is open. Does not extend subscriptions.")
+                    .help("Renew inactive sessions while this app is running. Does not extend subscriptions.")
                 Picker("Renew Before Token Expiry", selection: $renewalLeadDays) {
                     ForEach(1...7, id: \.self) { days in
                         Text(days == 1 ? "1 day" : "\(days) days").tag(days)
@@ -88,6 +84,65 @@ struct CodexProfilesApp: App {
                     .disabled(model.isWorking)
             }
         }
+        MenuBarExtra("Codex Profiles", systemImage: "person.crop.rectangle.stack", isInserted: $showMenuBar) {
+            ProfileMenuBarView(model: model)
+        }
+        .menuBarExtraStyle(.window)
+    }
+}
+
+private struct ProfileMenuBarView: View {
+    @ObservedObject var model: AppModel
+    @AppStorage("hide_emails") private var hideEmails = false
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Codex Profiles").font(.headline)
+                Spacer()
+                Button { model.refreshUsage(all: true, force: true) } label: {
+                    Image(systemName: "arrow.clockwise")
+                }.buttonStyle(.plain).help("Refresh all limits")
+                    .disabled(model.isWorking || !model.loadingUsage.isEmpty)
+            }
+            if model.profiles.isEmpty { Text("Save a profile in the main window.").foregroundStyle(.secondary) }
+            ScrollView {
+                VStack(spacing: 4) {
+                    ForEach(model.rows(sortedBy: .created).filter { $0.profileID != nil }) { row in
+                        Button { Task { await model.loadProfile(row) } } label: {
+                            HStack(spacing: 10) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(hideEmails && row.title.contains("@") ? "Profile " + String((model.rows(sortedBy: .created).firstIndex(where: { $0.id == row.id }) ?? 0) + 1) : row.title)
+                                        .font(.subheadline.weight(.medium)).lineLimit(1)
+                                    if let usage = row.usage, !usage.indicatorWindows.isEmpty {
+                                        Text(usage.indicatorWindows.map { "\($0.durationLabel) · \(Int($0.remainingPercent))% left" }.joined(separator: "   ") + (usage.isStale ? " · cached" : ""))
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    } else { Text("Limits unavailable").font(.caption).foregroundStyle(.secondary) }
+                                }
+                                Spacer()
+                                Image(systemName: row.isSwitching ? "ellipsis" : row.isCurrent ? "checkmark" : "arrow.right")
+                                    .foregroundStyle(row.usage?.indicatorWindows.first.map { quotaColor($0.remainingPercent) } ?? .secondary)
+                            }
+                            .padding(9).contentShape(Rectangle())
+                            .background(row.isCurrent ? Color.accentColor.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain).disabled(model.isWorking || row.isCurrent)
+                        .help(row.isCurrent ? "Current profile" : "Switch and restart ChatGPT")
+                    }
+                }
+            }.frame(maxHeight: 320)
+            if model.switchingProfileID != nil { Text("Switching · restarting ChatGPT…").font(.caption).foregroundStyle(.secondary) }
+            if let error = model.errorMessage { Text(error).font(.caption).foregroundStyle(.red).lineLimit(3) }
+            Divider()
+            HStack {
+                Button("Open Window") { openWindow(id: "profiles"); NSApp.activate(ignoringOtherApps: true) }
+                Spacer()
+                Button("Quit") { NSApp.terminate(nil) }.disabled(model.isWorking)
+            }
+        }
+        .padding(14).frame(width: 300)
+        .onAppear { model.startMaintenance(); if !model.isWorking { model.reload(); model.refreshUsage(all: true) } }
     }
 }
 
