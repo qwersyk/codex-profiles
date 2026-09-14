@@ -20,6 +20,19 @@ struct UsageSnapshot: Codable, Equatable {
     let fetchedAt: Date
     let windows: [UsageWindow]
 
+    var availableResets: Int? = nil
+
+    var indicatorWindows: [UsageWindow] {
+        let key = windows.first(where: { $0.id.hasPrefix("codex:") })?.id.components(separatedBy: ":").first
+            ?? windows.first?.id.components(separatedBy: ":").first
+        return windows.filter { $0.id.components(separatedBy: ":").first == key }
+            .sorted { ($0.durationMinutes ?? Int.max) < ($1.durationMinutes ?? Int.max) }
+    }
+
+    var isStale: Bool {
+        Date().timeIntervalSince(fetchedAt) > 3600 || windows.contains { ($0.resetsAt ?? .distantFuture) <= Date() }
+    }
+
     static func parse(_ result: [String: Any], now: Date = Date()) -> UsageSnapshot {
         var buckets = result["rateLimitsByLimitId"] as? [String: [String: Any]] ?? [:]
         if buckets.isEmpty, let legacy = result["rateLimits"] as? [String: Any] {
@@ -31,7 +44,7 @@ struct UsageSnapshot: Codable, Equatable {
             let name = bucket["limitName"] as? String ?? key
             for kind in ["primary", "secondary"] {
                 guard let value = bucket[kind] as? [String: Any],
-                      let used = value["usedPercent"] as? Double, used.isFinite else { continue }
+                      let used = (value["usedPercent"] as? NSNumber)?.doubleValue, used.isFinite else { continue }
                 let duration = (value["windowDurationMins"] as? NSNumber).flatMap { Int(exactly: $0.doubleValue) }
                     .flatMap { $0 > 0 ? $0 : nil }
                 let reset = (value["resetsAt"] as? Double).flatMap { $0 > 0 && $0.isFinite ? Date(timeIntervalSince1970: $0) : nil }
@@ -39,7 +52,8 @@ struct UsageSnapshot: Codable, Equatable {
                                            usedPercent: max(0, min(100, used)), durationMinutes: duration, resetsAt: reset))
             }
         }
-        return UsageSnapshot(fetchedAt: now, windows: windows)
+        let resets = (result["rateLimitResetCredits"] as? [String: Any])?["availableCount"] as? Int
+        return UsageSnapshot(fetchedAt: now, windows: windows, availableResets: resets.flatMap { $0 >= 0 ? $0 : nil })
     }
 }
 

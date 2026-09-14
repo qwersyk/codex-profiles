@@ -46,6 +46,7 @@ struct ProfileRow: Identifiable, Equatable {
     let isUnsavedCurrent: Bool
     var plan: String? = nil
     var renewalWarning: String? = nil
+    var usage: UsageSnapshot? = nil
 }
 
 enum SortOrder: String, CaseIterable, Identifiable {
@@ -122,6 +123,56 @@ final class AppModel: ObservableObject {
     @Published var browserLogin: BrowserLoginState?
     @Published private(set) var usageErrors: [UUID: String] = [:]
 
+    @Published private(set) var loadingUsage: Set<UUID> = []
+    private var usageAttempts: [UUID: Date] = [:]
+    private var usageQueue: [UUID] = []
+    private var usageWorker: Task<Void, Never>?
+
+    func refreshUsage(all: Bool = false, force: Bool = false) {
+        guard !isWorking else { return }
+        let current = store.currentSavedProfileID()
+        let candidates = profiles.sorted { ($0.id == current ? 0 : 1) < ($1.id == current ? 0 : 1) }
+        for profile in candidates where all || profile.id == current {
+            guard profile.renewalRequiresSignIn != true else { continue }
+            let now = Date()
+            let age = now.timeIntervalSince(profile.usage?.fetchedAt ?? .distantPast)
+            let resetDue = profile.usage?.windows.contains {
+                guard let reset = $0.resetsAt else { return false }
+                return reset > (profile.usage?.fetchedAt ?? .distantPast) && reset <= now
+            } ?? false
+            let interval: TimeInterval = profile.id == current ? 300 : 3600
+            guard force || ((age >= interval || resetDue) && now.timeIntervalSince(usageAttempts[profile.id] ?? .distantPast) >= 300) else { continue }
+            enqueueUsage(profile.id)
+        }
+    }
+
+    private func enqueueUsage(_ id: UUID) {
+        guard !loadingUsage.contains(id), !usageQueue.contains(id) else { return }
+        if id == store.currentSavedProfileID() { usageQueue.insert(id, at: 0) }
+        else { usageQueue.append(id) }
+        guard usageWorker == nil else { return }
+        usageWorker = Task {
+            defer { usageWorker = nil }
+            while !usageQueue.isEmpty && !Task.isCancelled {
+                if isWorking {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    continue
+                }
+                let id = usageQueue.removeFirst()
+                if let row = rows(sortedBy: .created).first(where: { $0.profileID == id }) {
+                    await loadUsage(for: row)
+                }
+            }
+        }
+    }
+
+    func switchAdjacentProfile(_ offset: Int) async {
+        let ordered = rows(sortedBy: .created).filter { $0.profileID != nil }
+        guard !ordered.isEmpty else { return }
+        let index = ordered.firstIndex(where: \.isCurrent) ?? (offset > 0 ? -1 : 0)
+        await loadProfile(ordered[(index + offset + ordered.count) % ordered.count])
+    }
+
     private let store = ProfileStore()
     private var loginController: CodexLoginController?
 
@@ -172,13 +223,17 @@ final class AppModel: ObservableObject {
 
     func loadUsage(for row: ProfileRow) async {
         guard let id = row.profileID, !isWorking else { return }
-        isWorking = true
-        isRenewingSession = true
-        defer { isWorking = false; isRenewingSession = false }
+        guard !loadingUsage.contains(id) else { return }
+        loadingUsage.insert(id)
+        usageAttempts[id] = Date()
+        defer { loadingUsage.remove(id) }
         usageErrors[id] = nil
         do {
             let auth = try store.usageAuth(id: id)
             let snapshot = try await SessionRenewal.limits(executable: codexCLIURL(), auth: auth)
+            // A new login or renewal may finish while the read-only request is in flight.
+            // Discard its old reading instead of attaching it to new credentials.
+            guard !isWorking, let latest = try? store.usageAuth(id: id), latest == auth else { return }
             try store.saveUsage(id: id, snapshot: snapshot)
         } catch {
             if let failure = error as? SessionRenewalError, failure == .accessExpired || failure == .signInRequired || failure == .unavailable {
@@ -187,7 +242,7 @@ final class AppModel: ObservableObject {
                 usageErrors[id] = "Could not load limits. Check your connection or try again later."
             }
         }
-        reload()
+        if let updated = try? store.loadProfiles() { profiles = updated }
     }
 
     func renewSession(id: UUID, automatically: Bool = false) async {
@@ -235,7 +290,8 @@ final class AppModel: ObservableObject {
                 isUnsavedCurrent: false,
                 plan: store.sessionMetadata(id: profile.id)?.plan,
                 renewalWarning: profile.renewalRequiresSignIn == true ? "Sign in again to reconnect this profile."
-                    : (profile.renewalFailed == true ? profile.renewalStatus : nil)
+                    : (profile.renewalFailed == true ? profile.renewalStatus : nil),
+                usage: profile.usage
             )
         }
 
@@ -343,7 +399,8 @@ final class AppModel: ObservableObject {
     }
 
     func loadProfile(_ row: ProfileRow) async {
-        guard let id = row.profileID else { return }
+        guard let id = row.profileID, !row.isCurrent, !isWorking else { return }
+        let outgoing = store.currentSavedProfileID()
         await runTask {
             try self.store.validateRestore(id: id)
             let shouldRelaunch = try await self.quitCodexIfRunning()
@@ -361,6 +418,8 @@ final class AppModel: ObservableObject {
             }
             self.reload()
         }
+        if let outgoing { enqueueUsage(outgoing) }
+        enqueueUsage(id)
     }
 
     func logoutCodex() async {

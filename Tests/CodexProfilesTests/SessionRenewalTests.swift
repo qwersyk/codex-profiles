@@ -146,6 +146,22 @@ enum SessionRenewalTests {
         XCTAssertEqual(parsed.windows[0].remainingPercent, 75)
         XCTAssertEqual(parsed.windows[0].durationLabel, "5h")
         XCTAssertEqual(UsageSnapshot.parse([:]).windows.count, 0)
+        let dual = UsageSnapshot.parse([
+            "rateLimitResetCredits": ["availableCount": 2],
+            "rateLimitsByLimitId": [
+                "codex": ["primary": ["usedPercent": 40, "windowDurationMins": 300],
+                          "secondary": ["usedPercent": 70, "windowDurationMins": 10080]],
+                "other": ["primary": ["usedPercent": 99, "windowDurationMins": 1]]
+            ]
+        ])
+        XCTAssertEqual(dual.availableResets, 2)
+        XCTAssertEqual(dual.indicatorWindows.count, 2)
+        XCTAssertEqual(dual.indicatorWindows.first?.remainingPercent, 60)
+        XCTAssertEqual(dual.indicatorWindows.last?.remainingPercent, 30)
+        XCTAssertEqual(parsed.indicatorWindows.count, 1)
+        XCTAssertEqual(parsed.availableResets, nil)
+        let oldCache = Data("{\"fetchedAt\":0,\"windows\":[]}".utf8)
+        XCTAssertEqual(try JSONDecoder().decode(UsageSnapshot.self, from: oldCache).availableResets, nil)
         try suite.store.saveUsage(id: id, snapshot: parsed)
         let cached = try suite.store.loadProfiles()[0].usage
         XCTAssertEqual(cached?.windows.count, 1)

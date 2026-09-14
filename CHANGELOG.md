@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.9
+- Show cached quota indicators on profile buttons with automatic background updates.
+- Add keyboard profile switching, refresh-all, and available reset counts.
+
 ## 1.8
 - Simplify session details and show cached usage limits with reset times.
 - Pause renewal for confirmed dead sessions until a new sign-in.

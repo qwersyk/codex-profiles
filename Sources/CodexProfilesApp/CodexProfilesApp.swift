@@ -14,16 +14,18 @@ struct CodexProfilesApp: App {
         Window("Codex Profiles", id: "profiles") {
             ContentView(model: model)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                    if !model.isWorking { model.reload() }
+                    if !model.isWorking { model.reload(); model.refreshUsage(all: true) }
                 }
                 .task {
                     appDelegate.setOpenHandler { urls in
                         Task { await model.importFiles(urls) }
                     }
+                    model.refreshUsage(all: true)
                     while !Task.isCancelled {
                         do { try await Task.sleep(nanoseconds: 10_000_000_000) } catch { break }
                         model.synchronizeSavedSession()
                         await model.renewInactiveSessionIfNeeded()
+                        model.refreshUsage(all: true)
                     }
                 }
         }
@@ -68,8 +70,18 @@ struct CodexProfilesApp: App {
                     }
                 }
                 .disabled(!renewInactiveSessions)
-                Button("Refresh") { model.reload() }
+                Button("Refresh Current Limits") { model.reload(); model.refreshUsage(force: true) }
                     .keyboardShortcut("r", modifiers: .command)
+                    .disabled(model.isWorking)
+                Button("Refresh All Limits") { model.reload(); model.refreshUsage(all: true, force: true) }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
+                    .disabled(model.isWorking)
+                Divider()
+                Button("Previous Profile") { Task { await model.switchAdjacentProfile(-1) } }
+                    .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                    .disabled(model.isWorking)
+                Button("Next Profile") { Task { await model.switchAdjacentProfile(1) } }
+                    .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
                     .disabled(model.isWorking)
                 Button("Sign Out Locally") { Task { await model.logoutCodex() } }
                     .keyboardShortcut("l", modifiers: [.command, .shift])

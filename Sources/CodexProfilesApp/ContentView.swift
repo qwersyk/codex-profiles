@@ -95,7 +95,7 @@ struct ContentView: View {
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted, perform: handleDrop(providers:))
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                if model.isWorking { ProgressView().controlSize(.small) }
+                if model.isWorking || !model.loadingUsage.isEmpty { ProgressView().controlSize(.small) }
                 Button {
                     Task { await model.startBrowserLoginProfile() }
                 } label: {
@@ -375,9 +375,7 @@ private struct ProfileRowView: View {
                         .init(title: "Delete Profile…", symbol: "trash", enabled: !isBusy, action: { confirmDelete = true })
                     ])
                     .frame(width: 28, height: 28)
-                    IconPill(symbol: row.isCurrent ? "checkmark" : "arrow.left.arrow.right", action: loadAction,
-                             help: row.isCurrent ? "Current profile" : "Switch to this profile")
-                        .disabled(row.isCurrent || isBusy)
+                    QuotaSwitch(row: row, isBusy: isBusy, action: loadAction)
                 }
             }
         }
@@ -468,6 +466,52 @@ private struct MetaChip: View {
         }
         .font(.system(size: 10))
         .foregroundStyle(.secondary)
+    }
+}
+
+private struct QuotaSwitch: View {
+    let row: ProfileRow
+    let isBusy: Bool
+    let action: () -> Void
+
+    private var windows: [UsageWindow] { row.usage?.indicatorWindows ?? [] }
+    private var hint: String {
+        var text = row.isCurrent ? "Current profile" : "Switch to this profile"
+        for window in windows { text += "\n\(window.durationLabel): \(Int(window.remainingPercent))% remaining" }
+        if let usage = row.usage {
+            text += "\nUpdated \(usage.fetchedAt.formatted(date: .abbreviated, time: .shortened))"
+            if usage.isStale { text += " · cached" }
+            if let count = usage.availableResets { text += "\nAvailable resets: \(count)" }
+        } else { text += "\nLimits not loaded" }
+        return text
+    }
+
+    var body: some View {
+        Button { if !row.isCurrent { action() } } label: {
+            ZStack(alignment: .bottom) {
+                RoundedRectangle(cornerRadius: 9).fill(Color.primary.opacity(0.08))
+                if let first = windows.first {
+                    Color.accentColor.opacity(row.usage?.isStale == true ? 0.2 : 0.45)
+                        .frame(height: 32 * first.remainingPercent / 100)
+                }
+                Image(systemName: row.isCurrent ? "checkmark" : "arrow.left.arrow.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 32, height: 32)
+            }
+            .frame(width: 32, height: 32)
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .overlay {
+                if windows.count > 1, let last = windows.last {
+                    RoundedRectangle(cornerRadius: 9).stroke(Color.primary.opacity(0.12), lineWidth: 2)
+                    RoundedRectangle(cornerRadius: 9).trim(from: 0, to: last.remainingPercent / 100)
+                        .stroke(Color.accentColor.opacity(row.usage?.isStale == true ? 0.35 : 1), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(isBusy)
+        .help(hint)
+        .accessibilityLabel(hint)
     }
 }
 
@@ -742,12 +786,15 @@ private struct SessionDetailsView: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("Usage limits").font(.subheadline.weight(.semibold))
+                if let count = overview.usage?.availableResets {
+                    Text("\(count) resets").font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
-                if model.isWorking { ProgressView().controlSize(.small) }
+                if row.profileID.map({ model.loadingUsage.contains($0) }) == true { ProgressView().controlSize(.small) }
                 Button { Task { await model.loadUsage(for: row) } } label: {
                     Label(overview.usage == nil ? "Load" : "Refresh", systemImage: "arrow.clockwise")
                 }
-                .disabled(model.isWorking || overview.requiresSignIn)
+                .disabled(model.isWorking || overview.requiresSignIn || row.profileID.map({ model.loadingUsage.contains($0) }) == true)
             }
             if let usage = overview.usage {
                 if usage.windows.isEmpty {

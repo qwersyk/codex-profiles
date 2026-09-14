@@ -70,9 +70,9 @@ cat > "$APP_DIR/Contents/Info.plist" <<'EOF'
     <key>NSHumanReadableCopyright</key>
     <string>qwersyk</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.8</string>
+    <string>1.9</string>
     <key>CFBundleVersion</key>
-    <string>11</string>
+    <string>12</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>
