@@ -14,8 +14,9 @@ Native macOS manager for local ChatGPT / Codex profiles.
 
 ## Features
 
-- Save, switch, import, export, and locally sign out of profiles
-- Optional email hiding, search, avatars, and profile renaming
+- Browser sign-in, profile switching, imports, exports, and local sign-out
+- Cached limits, reset counts, and manual or automatic session renewal
+- Optional menu bar, ⌘0–9 switching, email privacy, and custom avatars
 
 ## Build
 

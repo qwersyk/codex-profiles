@@ -146,7 +146,7 @@ enum SessionRenewal {
         try process.run()
         let outcome: Result<[String: Any], Error>
         do {
-            try send(["id": 0, "method": "initialize", "params": ["clientInfo": ["name": "codex_profiles", "title": "Codex Profiles", "version": "1.13"], "capabilities": ["experimentalApi": experimental]]], to: input)
+            try send(["id": 0, "method": "initialize", "params": ["clientInfo": ["name": "codex_profiles", "title": "Codex Profiles", "version": "2.0"], "capabilities": ["experimentalApi": experimental]]], to: input)
             var pending = Data()
             var totalBytes = 0
             var initialized = false
