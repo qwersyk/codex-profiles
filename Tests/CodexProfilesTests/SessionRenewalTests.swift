@@ -108,6 +108,72 @@ enum SessionRenewalTests {
         } catch { XCTAssertEqual(error as? SessionRenewalError == .timeout, true) }
         precondition(Date().timeIntervalSince(start) < 5)
         print("PASS: Failed response and timeout preserve credentials without exposing secrets")
+
+        XCTAssertEqual(SessionRenewalError.classify(["message": "Your refresh token was already used."]), .signInRequired)
+        XCTAssertEqual(SessionRenewalError.classify(["message": "Connection timed out"]), .failed)
+        let dead = try script(suite, """
+        IFS= read -r request
+        print -r -- '{"id":0,"result":{}}'
+        IFS= read -r request
+        IFS= read -r request
+        print -r -- '{"id":1,"result":{"account":{"type":"chatgpt"}}}'
+        IFS= read -r request
+        [[ "$request" == *getAuthStatus* ]] || exit 6
+        print -r -- '{"id":2,"result":{"authMethod":"chatgpt","authToken":null,"requiresOpenaiAuth":true}}'
+        """)
+        do {
+            try await SessionRenewal.renew(executable: dead, home: sessionHome)
+            preconditionFailure("Expected permanent failure")
+        } catch { XCTAssertEqual(error as? SessionRenewalError, .signInRequired) }
+        try suite.store.recordRenewal(id: id, status: "Sign in again", failed: true, requiresSignIn: true)
+        XCTAssertEqual(suite.store.nextRenewalID(now: now.addingTimeInterval(30 * 86_400)), nil)
+        XCTAssertThrowsError(try suite.store.renewalHome(id: id))
+        _ = try suite.store.importFile(from: suite.file(renewed), fallbackIndex: 1)
+        XCTAssertEqual(try suite.store.loadProfiles()[0].renewalRequiresSignIn, true)
+        let newLogin = try auth("session", expires: now.addingTimeInterval(20 * 86_400), refresh: "new-login")
+        _ = try suite.store.importFile(from: suite.file(newLogin), fallbackIndex: 1)
+        XCTAssertEqual(try suite.store.loadProfiles()[0].renewalRequiresSignIn, nil)
+        print("PASS: Permanent failures stop retries until new credentials arrive")
+
+        let parsed = UsageSnapshot.parse([
+            "rateLimits": ["primary": ["usedPercent": 99]],
+            "rateLimitsByLimitId": ["codex": [
+                "primary": ["usedPercent": 25.0, "windowDurationMins": 300, "resetsAt": now.timeIntervalSince1970 + 600],
+                "secondary": NSNull()
+            ], "other": ["primary": ["windowDurationMins": 20]]]
+        ], now: now)
+        XCTAssertEqual(parsed.windows.count, 1)
+        XCTAssertEqual(parsed.windows[0].remainingPercent, 75)
+        XCTAssertEqual(parsed.windows[0].durationLabel, "5h")
+        XCTAssertEqual(UsageSnapshot.parse([:]).windows.count, 0)
+        try suite.store.saveUsage(id: id, snapshot: parsed)
+        let cached = try suite.store.loadProfiles()[0].usage
+        XCTAssertEqual(cached?.windows.count, 1)
+        XCTAssertEqual(cached?.windows[0].remainingPercent, 75)
+        precondition(abs(cached!.fetchedAt.timeIntervalSince(parsed.fetchedAt)) < 1)
+        print("PASS: Usage buckets, missing windows, remaining percentage, and cache")
+
+        let usageCLI = try script(suite, """
+        [[ ! -e "$CODEX_HOME/auth.json" ]] || exit 2
+        IFS= read -r request
+        [[ "$request" == *'"experimentalApi":true'* ]] || exit 3
+        print -r -- '{"id":0,"result":{}}'
+        IFS= read -r request
+        IFS= read -r request
+        [[ "$request" == *chatgptAuthTokens* && "$request" != *refresh_token* ]] || exit 4
+        print -r -- '{"id":1,"result":{"type":"chatgptAuthTokens"}}'
+        IFS= read -r request
+        [[ "$request" == *account*rateLimits*read* ]] || exit 5
+        print -r -- '{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":25,"windowDurationMins":300}}}}'
+        """)
+        let usage = try await SessionRenewal.limits(executable: usageCLI, auth: newLogin)
+        XCTAssertEqual(usage.windows[0].remainingPercent, 75)
+        XCTAssertEqual(try Data(contentsOf: sessionHome.appendingPathComponent("auth.json")), newLogin)
+        do {
+            _ = try await SessionRenewal.limits(executable: usageCLI, auth: auth("expired", expires: now.addingTimeInterval(-1)))
+            preconditionFailure("Expired access token should not be sent")
+        } catch { XCTAssertEqual(error as? SessionRenewalError, .accessExpired) }
+        print("PASS: Usage reads use isolated access-only auth without rotating saved sessions")
     }
 
     private static func script(_ suite: ProfileStoreTests, _ body: String) throws -> URL {

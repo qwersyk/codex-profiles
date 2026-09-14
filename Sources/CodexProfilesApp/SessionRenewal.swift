@@ -62,10 +62,20 @@ struct SessionMetadata {
 }
 
 enum SessionRenewalError: LocalizedError {
-    case unavailable, active, shared, failed, timeout, unchanged
+    case unavailable, active, shared, failed, timeout, unchanged, signInRequired, accessExpired
+
+    static func classify(_ object: Any) -> SessionRenewalError {
+        let data = (try? JSONSerialization.data(withJSONObject: object, options: [.fragmentsAllowed])) ?? Data()
+        let message = String(decoding: data, as: UTF8.self).lowercased()
+        let permanent = ["refresh_token_expired", "refresh_token_reused", "refresh_token_invalidated",
+                         "refresh token has expired", "refresh token was already used", "refresh token was revoked"]
+        return permanent.contains(where: message.contains) ? .signInRequired : .failed
+    }
 
     var errorDescription: String? {
         switch self {
+        case .signInRequired: return "This session can no longer be renewed. Sign in again; automatic retries are paused."
+        case .accessExpired: return "Renew this session before checking limits. If renewal fails, sign in again."
         case .unavailable: return "This profile has no managed refresh token. Sign in again to save a renewable session."
         case .active: return "ChatGPT manages renewal for the active account. Switch to another account before renewing this saved session."
         case .shared: return "Another saved profile shares this refresh token. Sign in separately to avoid invalidating its session."
@@ -80,6 +90,36 @@ enum SessionRenewalError: LocalizedError {
 @MainActor
 enum SessionRenewal {
     static func renew(executable: URL, home: URL, timeout: TimeInterval = 30) async throws {
+        let result = try await request(executable: executable, home: home, timeout: timeout,
+                                       requests: [("account/read", ["refreshToken": true])], verifyRenewal: true)
+        guard (result["account"] as? [String: Any])?["type"] as? String == "chatgpt" else {
+            throw SessionRenewalError.failed
+        }
+    }
+
+    /// External access-token mode prevents a usage check from rotating shared refresh tokens.
+    static func limits(executable: URL, auth: Data) async throws -> UsageSnapshot {
+        let metadata = SessionMetadata(data: auth)
+        guard let expiry = metadata.expiresAt, expiry > Date() else { throw SessionRenewalError.accessExpired }
+        let json = (try? JSONSerialization.jsonObject(with: auth)) as? [String: Any]
+        guard let tokens = json?["tokens"] as? [String: Any],
+              let access = tokens["access_token"] as? String, !access.isEmpty,
+              let account = tokens["account_id"] as? String, !account.isEmpty else { throw SessionRenewalError.unavailable }
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: home) }
+        let result = try await request(executable: executable, home: home, requests: [
+            ("account/login/start", ["type": "chatgptAuthTokens", "accessToken": access, "chatgptAccountId": account]),
+            ("account/rateLimits/read", [:])
+        ], experimental: true)
+        return UsageSnapshot.parse(result)
+    }
+
+    private static func request(executable: URL, home: URL, timeout: TimeInterval = 30,
+                                requests: [(String, [String: Any])], experimental: Bool = false,
+                                verifyRenewal: Bool = false) async throws -> [String: Any] {
+        var queued = requests
+        let previousAuth = verifyRenewal ? try? Data(contentsOf: home.appendingPathComponent("auth.json")) : nil
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: temporary) }
@@ -104,14 +144,16 @@ enum SessionRenewal {
         process.standardOutput = writer
         process.standardError = FileHandle.nullDevice
         try process.run()
-        let outcome: Result<Void, Error>
+        let outcome: Result<[String: Any], Error>
         do {
-            try send(["id": 0, "method": "initialize", "params": ["clientInfo": ["name": "codex_profiles", "title": "Codex Profiles", "version": "1.7"]]], to: input)
+            try send(["id": 0, "method": "initialize", "params": ["clientInfo": ["name": "codex_profiles", "title": "Codex Profiles", "version": "1.8"], "capabilities": ["experimentalApi": experimental]]], to: input)
             var pending = Data()
             var totalBytes = 0
             var initialized = false
             var finished = false
             var observedExit = false
+            var requestIndex = 0
+            var response: [String: Any] = [:]
             let deadline = ProcessInfo.processInfo.systemUptime + timeout
             while !finished {
                 try Task.checkCancellation()
@@ -123,19 +165,39 @@ enum SessionRenewal {
                 while let end = pending.firstIndex(of: 10) {
                     let line = Data(pending[..<end])
                     pending.removeSubrange(...end)
-                    guard let object = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
-                          let id = object["id"] as? Int else { continue }
-                    guard object["error"] == nil else { throw SessionRenewalError.failed }
+                    guard let object = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { continue }
+                    if object["method"] as? String == "account/chatgptAuthTokens/refresh" {
+                        throw SessionRenewalError.accessExpired
+                    }
+                    guard let id = object["id"] as? Int else { continue }
+                    if let error = object["error"] { throw SessionRenewalError.classify(error) }
                     if id == 0 && !initialized {
                         guard object["result"] != nil else { throw SessionRenewalError.failed }
                         try send(["method": "initialized"], to: input)
-                        try send(["id": 1, "method": "account/read", "params": ["refreshToken": true]], to: input)
+                        try send(["id": 1, "method": queued[0].0, "params": queued[0].1], to: input)
                         initialized = true
-                    } else if id == 1 && initialized {
-                        let result = object["result"] as? [String: Any]
-                        let account = result?["account"] as? [String: Any]
-                        guard account?["type"] as? String == "chatgpt" else { throw SessionRenewalError.failed }
-                        finished = true
+                    } else if id == requestIndex + 1 && initialized {
+                        guard let result = object["result"] as? [String: Any] else { throw SessionRenewalError.failed }
+                        if queued[requestIndex].0 == "getAuthStatus" {
+                            // account/read can swallow refresh errors. The compatibility endpoint
+                            // suppresses authToken for a confirmed permanent refresh failure.
+                            // Never display, persist, or log that token.
+                            if result["authMethod"] as? String == "chatgpt", result["authToken"] is NSNull {
+                                throw SessionRenewalError.signInRequired
+                            }
+                        } else {
+                            response = result
+                        }
+                        if verifyRenewal && requestIndex == 0, let previousAuth,
+                           let latest = try? Data(contentsOf: home.appendingPathComponent("auth.json")),
+                           !SessionMetadata.credentialsChanged(from: previousAuth, to: latest) {
+                            queued.append(("getAuthStatus", ["includeToken": true, "refreshToken": false]))
+                        }
+                        requestIndex += 1
+                        finished = requestIndex == queued.count
+                        if !finished {
+                            try send(["id": requestIndex + 1, "method": queued[requestIndex].0, "params": queued[requestIndex].1], to: input)
+                        }
                     }
                 }
                 if !finished {
@@ -145,7 +207,7 @@ enum SessionRenewal {
                     try await Task.sleep(nanoseconds: 100_000_000)
                 }
             }
-            outcome = .success(())
+            outcome = .success(response)
         } catch { outcome = .failure(error) }
         try? input.fileHandleForWriting.close()
         if process.isRunning { process.terminate() }
@@ -154,7 +216,7 @@ enum SessionRenewal {
         }
         if process.isRunning { kill(process.processIdentifier, SIGKILL) }
         process.waitUntilExit()
-        try outcome.get()
+        return try outcome.get()
     }
 
     private static func send(_ object: [String: Any], to input: Pipe) throws {

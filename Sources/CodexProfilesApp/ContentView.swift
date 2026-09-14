@@ -369,7 +369,7 @@ private struct ProfileRowView: View {
                     ProfileActionsMenu(actions: [
                         .init(title: "Edit Profile", symbol: "pencil", enabled: !isBusy, action: renameAction),
                         .init(title: "Export Profile", symbol: "square.and.arrow.up", enabled: !isBusy, action: exportAction),
-                        .init(title: "Session Details…", symbol: "info.circle", action: detailsAction),
+                        .init(title: "Session & Limits…", symbol: "info.circle", action: detailsAction),
                         .init(title: "Renew Session", symbol: "arrow.clockwise", enabled: canRenew && !isBusy, action: renewAction),
                         .init(title: "Sign In Again…", symbol: "person.crop.circle.badge.plus", enabled: !isBusy, action: signInAction),
                         .init(title: "Delete Profile…", symbol: "trash", enabled: !isBusy, action: { confirmDelete = true })
@@ -677,24 +677,104 @@ private struct SessionDetailsView: View {
     let row: ProfileRow
     let close: () -> Void
     let signIn: () -> Void
+    @State private var showTechnical = false
+
+    private var overview: SessionOverview { model.sessionOverview(for: row) }
+    private var usageError: String? { row.profileID.flatMap { model.usageErrors[$0] } }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Session Details").font(.headline)
-            Text(model.sessionDetails(for: row)).font(.callout).textSelection(.enabled)
-            if model.canRenew(row), let id = row.profileID {
-                HStack {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Text("Session Details").font(.headline)
+                Spacer()
+                if let plan = overview.plan { Text(plan).font(.subheadline).foregroundStyle(.secondary) }
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Label(overview.requiresSignIn ? "Sign-in required" : overview.renewalFailed ? "Renewal failed" : row.isCurrent ? "Active in ChatGPT" : "Saved session",
+                          systemImage: overview.requiresSignIn || overview.renewalFailed ? "exclamationmark.circle" : "person.crop.circle")
+                        .foregroundStyle(overview.requiresSignIn || overview.renewalFailed ? Color.orange : Color.secondary)
+                    if overview.requiresSignIn {
+                        Text("This session has been revoked or can no longer be renewed. Automatic retries are paused until you sign in again.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    } else if overview.renewalFailed {
+                        Text("The last renewal did not finish. Try again later or reconnect this account.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    VStack(spacing: 8) {
+                        detail("Token expires", date: overview.expiresAt)
+                        if let next = overview.nextAttempt { detail("Auto-renew", date: max(next, Date())) }
+                    }
+                    Divider()
+                    usageSection
+                    DisclosureGroup("Technical details", isExpanded: $showTechnical) {
+                        Text(model.sessionDetails(for: row)).font(.caption).foregroundStyle(.secondary)
+                            .textSelection(.enabled).padding(.top, 6)
+                    }
+                    .font(.caption)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(height: min(430, 160 + CGFloat(overview.usage?.windows.count ?? 0) * 70
+                               + (overview.requiresSignIn || overview.renewalFailed ? 50 : 0)
+                               + (usageError != nil ? 45 : 0) + (showTechnical ? 180 : 0)))
+            HStack {
+                if model.canRenew(row), let id = row.profileID {
                     Button("Renew Session") { Task { await model.renewSession(id: id) } }
                         .disabled(model.isWorking)
-                    if model.isWorking { ProgressView().controlSize(.small) }
                 }
-            }
-            HStack {
-                Button("Sign In Again…", action: signIn)
-                    .disabled(model.isWorking)
+                Button("Sign In Again…", action: signIn).disabled(model.isWorking)
                 Spacer()
                 Button("Done", action: close).keyboardShortcut(.defaultAction)
             }
-        }.padding(22).frame(width: 370)
+        }.padding(22).frame(width: 410)
+    }
+
+    private func detail(_ title: String, date: Date?) -> some View {
+        HStack {
+            Text(title).foregroundStyle(.secondary)
+            Spacer()
+            Text(date?.formatted(date: .abbreviated, time: .shortened) ?? "Unavailable")
+        }.font(.callout)
+    }
+
+    private var usageSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Usage limits").font(.subheadline.weight(.semibold))
+                Spacer()
+                if model.isWorking { ProgressView().controlSize(.small) }
+                Button { Task { await model.loadUsage(for: row) } } label: {
+                    Label(overview.usage == nil ? "Load" : "Refresh", systemImage: "arrow.clockwise")
+                }
+                .disabled(model.isWorking || overview.requiresSignIn)
+            }
+            if let usage = overview.usage {
+                if usage.windows.isEmpty {
+                    Text("No usage windows were returned for this account.").font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach(usage.windows) { window in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(window.bucket + " · " + window.durationLabel)
+                            Spacer()
+                            Text("\(Int(window.remainingPercent))% left").monospacedDigit()
+                        }.font(.caption)
+                        ProgressView(value: window.remainingPercent, total: 100)
+                            .tint(window.remainingPercent < 10 ? .orange : .accentColor)
+                        if let reset = window.resetsAt {
+                            Text(reset > Date() ? "Resets " + reset.formatted(date: .abbreviated, time: .shortened) : "Reset time passed — refresh to update")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                HStack {
+                    Text("Saved reading · " + usage.fetchedAt.formatted(date: .abbreviated, time: .shortened))
+                }.font(.caption2).foregroundStyle(.secondary)
+            } else {
+                Text("Load remaining usage and reset times for this account.").font(.caption).foregroundStyle(.secondary)
+            }
+            if let usageError { Text(usageError).font(.caption).foregroundStyle(.orange) }
+        }
     }
 }
