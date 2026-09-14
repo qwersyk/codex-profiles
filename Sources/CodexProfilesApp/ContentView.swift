@@ -322,9 +322,6 @@ private struct ProfileRowView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
 
-                    if !row.isUnsavedCurrent && !showsSecondaryEmail {
-                        editButton
-                    }
                     if let plan = row.plan {
                         Text(plan)
                             .font(.system(size: 9, weight: .semibold))
@@ -348,12 +345,11 @@ private struct ProfileRowView: View {
                 }
 
                 HStack(spacing: 8) {
-                    if let email = row.email, showsSecondaryEmail {
-                        Text(hideEmails ? "Email hidden" : email)
+                    if let email = row.email, showsSecondaryEmail, !hideEmails {
+                        Text(email)
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                        editButton
                     } else if row.isUnsavedCurrent {
                         Text("Not saved")
                             .font(.system(size: 11))
@@ -492,12 +488,12 @@ struct ResetBadge: View {
     var body: some View {
         if let count, count > 0 {
             Text(String(count))
-                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .font(.system(size: 9, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .foregroundStyle(Color.orange)
-                .padding(.horizontal, 5).frame(minWidth: 18, minHeight: 18)
-                .background(Color.orange.opacity(0.09), in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.orange.opacity(0.25), lineWidth: 1))
+                .foregroundStyle(Color.blue)
+                .padding(.horizontal, 4).frame(minWidth: 15, minHeight: 15)
+                .background(Color.blue.opacity(0.09), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.blue.opacity(0.25), lineWidth: 1))
                 .fixedSize()
                 .help("Available limit resets: \(count)")
                 .accessibilityLabel("\(count) available limit resets")

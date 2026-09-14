@@ -20,7 +20,10 @@ struct CodexProfilesApp: App {
         Window("Codex Profiles", id: "profiles") {
             ContentView(model: model)
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                    if !model.isWorking { model.reload(); model.refreshUsage(all: true) }
+                    Task {
+                        try? await Task.sleep(nanoseconds: 200_000_000)
+                        if !model.isWorking { model.reload(); model.refreshUsage(all: true) }
+                    }
                 }
                 .task {
                     appDelegate.setOpenHandler { urls in
@@ -107,6 +110,7 @@ private struct ProfileMenuBarView: View {
     @AppStorage("sort_order") private var sortOrderRaw = SortOrder.recent.rawValue
     @AppStorage("hide_emails") private var hideEmails = false
     @Environment(\.openWindow) private var openWindow
+    @State private var hoveredProfileID: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -142,9 +146,13 @@ private struct ProfileMenuBarView: View {
                                 }
                             }
                             .padding(.horizontal, 8).padding(.vertical, 6).contentShape(Rectangle())
-                            .background(row.isCurrent ? Color.accentColor.opacity(0.1) : .clear, in: RoundedRectangle(cornerRadius: 8))
+                            .background(Color.accentColor.opacity(hoveredProfileID == row.id && !model.isWorking ? 0.18 : row.isCurrent ? 0.1 : 0), in: RoundedRectangle(cornerRadius: 8))
                         }
                         .buttonStyle(.plain).disabled(model.isWorking)
+                        .onHover { hovering in
+                            if hovering { hoveredProfileID = row.id }
+                            else if hoveredProfileID == row.id { hoveredProfileID = nil }
+                        }
                         .help(row.isCurrent ? "Current profile" : "Switch and restart ChatGPT")
                     }
                 }
@@ -162,7 +170,13 @@ private struct ProfileMenuBarView: View {
             }
         }
         .padding(12).frame(width: 270)
-        .onAppear { model.startMaintenance(); if !model.isWorking { model.reload(); model.refreshUsage(all: true) } }
+        .task {
+            // Present cached rows first; disk and network work must not delay the popover.
+            do { try await Task.sleep(nanoseconds: 200_000_000) } catch { return }
+            model.startMaintenance()
+            model.refreshUsage(all: true)
+        }
+        .onDisappear { hoveredProfileID = nil }
     }
 }
 

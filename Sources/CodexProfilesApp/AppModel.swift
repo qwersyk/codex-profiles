@@ -175,6 +175,16 @@ final class AppModel: ObservableObject {
         await loadProfile(ordered[(index + offset + ordered.count) % ordered.count])
     }
 
+    private var cachedCurrentID: UUID?
+    private var cachedPlans: [UUID: String] = [:]
+
+    private func refreshPresentationCache() {
+        cachedCurrentID = store.currentSavedProfileID()
+        cachedPlans = Dictionary(uniqueKeysWithValues: profiles.compactMap { profile in
+            store.sessionMetadata(id: profile.id)?.plan.map { (profile.id, $0) }
+        })
+    }
+
     private let store = ProfileStore()
     private var loginController: CodexLoginController?
     @Published private(set) var switchingProfileID: UUID?
@@ -201,6 +211,7 @@ final class AppModel: ObservableObject {
             try store.synchronizeSavedSession()
             profiles = try store.loadProfiles()
             currentProfile = store.currentProfile()
+            refreshPresentationCache()
         } catch {
             profiles = []
             currentProfile = store.currentProfile()
@@ -210,7 +221,12 @@ final class AppModel: ObservableObject {
 
     func synchronizeSavedSession() {
         guard !isWorking else { return }
-        do { try store.synchronizeSavedSession() }
+        do {
+            try store.synchronizeSavedSession()
+            profiles = try store.loadProfiles()
+            currentProfile = store.currentProfile()
+            refreshPresentationCache()
+        }
         catch { errorMessage = "Could not preserve the current session: " + error.localizedDescription }
     }
 
@@ -291,7 +307,7 @@ final class AppModel: ObservableObject {
     }
 
     func rows(sortedBy sortOrder: SortOrder) -> [ProfileRow] {
-        let currentID = store.currentSavedProfileID()
+        let currentID = cachedCurrentID
         let shortcutIDs = sortedProfiles(by: sortOrder).prefix(10).map(\.id)
         let savedRows = sortedProfiles(by: sortOrder).map { profile in
             return ProfileRow(
@@ -305,7 +321,7 @@ final class AppModel: ObservableObject {
                 lastLoadedAt: profile.lastLoadedAt,
                 isCurrent: currentID == profile.id,
                 isUnsavedCurrent: false,
-                plan: store.sessionMetadata(id: profile.id)?.plan,
+                plan: cachedPlans[profile.id],
                 renewalWarning: profile.renewalRequiresSignIn == true ? "Sign in again to reconnect this profile."
                     : (profile.renewalFailed == true ? profile.renewalStatus : nil),
                 usage: profile.usage,
