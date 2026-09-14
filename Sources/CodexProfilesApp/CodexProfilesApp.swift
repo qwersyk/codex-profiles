@@ -5,7 +5,8 @@ struct CodexProfilesApp: App {
     @StateObject private var model = AppModel()
     @AppStorage("hide_emails") private var hideEmails = false
     @AppStorage("show_search") private var showSearch = false
-    @AppStorage("renew_inactive_sessions") private var renewInactiveSessions = false
+    @AppStorage("renew_inactive_sessions") private var renewInactiveSessions = true
+    @AppStorage("renewal_lead_days") private var renewalLeadDays = 1
     @AppStorage("sort_order") private var sortOrderRaw = SortOrder.recent.rawValue
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
@@ -60,7 +61,13 @@ struct CodexProfilesApp: App {
                     .disabled(model.isWorking)
                 Divider()
                 Toggle("Renew Inactive Sessions Automatically", isOn: $renewInactiveSessions)
-                    .help("While this app is open, renew inactive sessions within one day of token expiry. Does not extend subscriptions.")
+                    .help("Renew inactive sessions while this window is open. Does not extend subscriptions.")
+                Picker("Renew Before Token Expiry", selection: $renewalLeadDays) {
+                    ForEach(1...7, id: \.self) { days in
+                        Text(days == 1 ? "1 day" : "\(days) days").tag(days)
+                    }
+                }
+                .disabled(!renewInactiveSessions)
                 Button("Refresh") { model.reload() }
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(model.isWorking)

@@ -1,6 +1,17 @@
 import Foundation
 import Darwin
 
+enum RenewalPreferences {
+    static func isEnabled(in defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: "renew_inactive_sessions") as? Bool ?? true
+    }
+
+    static func leadDays(in defaults: UserDefaults = .standard) -> Int {
+        let value = defaults.object(forKey: "renewal_lead_days") as? Int ?? 1
+        return min(7, max(1, value))
+    }
+}
+
 /// Local claims describe the saved session, not a live billing entitlement.
 struct SessionMetadata {
     let plan: String?
@@ -20,12 +31,25 @@ struct SessionMetadata {
         expiresAt = (access["exp"] as? Double).map(Date.init(timeIntervalSince1970:))
         refreshToken = (tokens["refresh_token"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let apiKey = (json["OPENAI_API_KEY"] as? String) ?? ""
-        isManaged = apiKey.isEmpty && (json["auth_mode"] as? String != "chatgptAuthTokens") && refreshToken != nil
+        let mode = json["auth_mode"] as? String
+        isManaged = apiKey.isEmpty && (mode == nil || mode == "chatgpt") && refreshToken != nil
     }
 
-    func needsRenewal(now: Date, lastAttempt: Date?) -> Bool {
-        guard isManaged, let expiresAt, expiresAt <= now.addingTimeInterval(86_400) else { return false }
-        return lastAttempt.map { now.timeIntervalSince($0) >= 86_400 } ?? true
+    func scheduledRenewal(lastAttempt: Date?, leadDays: Int = 1) -> Date? {
+        guard isManaged, let expiresAt else { return nil }
+        let due = expiresAt.addingTimeInterval(-Double(min(7, max(1, leadDays))) * 86_400)
+        return lastAttempt.map { max(due, $0.addingTimeInterval(86_400)) } ?? due
+    }
+
+    func needsRenewal(now: Date, lastAttempt: Date?, leadDays: Int = 1) -> Bool {
+        scheduledRenewal(lastAttempt: lastAttempt, leadDays: leadDays).map { $0 <= now } ?? false
+    }
+
+    static func credentialsChanged(from previous: Data, to renewed: Data) -> Bool {
+        let old = ((try? JSONSerialization.jsonObject(with: previous)) as? [String: Any])?["tokens"] as? [String: Any]
+        let new = ((try? JSONSerialization.jsonObject(with: renewed)) as? [String: Any])?["tokens"] as? [String: Any]
+        return old?["access_token"] as? String != new?["access_token"] as? String
+            || old?["refresh_token"] as? String != new?["refresh_token"] as? String
     }
 
     private static func payload(_ token: String?) -> [String: Any] {
@@ -73,6 +97,7 @@ enum SessionRenewal {
         // A provider key inherited from the shell must not override this saved account.
         environment.removeValue(forKey: "OPENAI_API_KEY")
         environment.removeValue(forKey: "CODEX_API_KEY")
+        environment.removeValue(forKey: "CODEX_ACCESS_TOKEN")
         process.environment = environment
         process.currentDirectoryURL = home
         process.standardInput = input
@@ -81,7 +106,7 @@ enum SessionRenewal {
         try process.run()
         let outcome: Result<Void, Error>
         do {
-            try send(["id": 0, "method": "initialize", "params": ["clientInfo": ["name": "codex_profiles", "title": "Codex Profiles", "version": "1.6"]]], to: input)
+            try send(["id": 0, "method": "initialize", "params": ["clientInfo": ["name": "codex_profiles", "title": "Codex Profiles", "version": "1.7"]]], to: input)
             var pending = Data()
             var totalBytes = 0
             var initialized = false

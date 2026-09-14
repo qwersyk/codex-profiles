@@ -13,6 +13,7 @@ struct SavedProfile: Codable, Identifiable, Equatable {
     var lastLoadedAt: Date?
     var lastRenewalAttemptAt: Date?
     var renewalStatus: String?
+    var renewalFailed: Bool?
 
     var displayName: String {
         if let customName = customName?.trimmingCharacters(in: .whitespacesAndNewlines), !customName.isEmpty {
@@ -42,6 +43,7 @@ struct ProfileRow: Identifiable, Equatable {
     let isCurrent: Bool
     let isUnsavedCurrent: Bool
     var plan: String? = nil
+    var renewalWarning: String? = nil
 }
 
 enum SortOrder: String, CaseIterable, Identifiable {
@@ -113,6 +115,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var profiles: [SavedProfile] = []
     @Published private(set) var currentProfile = CurrentProfileInfo()
     @Published var isWorking = false
+    @Published private(set) var isRenewingSession = false
     @Published var errorMessage: String?
     @Published var browserLogin: BrowserLoginState?
 
@@ -143,7 +146,8 @@ final class AppModel: ObservableObject {
 
     func sessionDetails(for row: ProfileRow) -> String {
         guard let id = row.profileID else { return "Save this profile to view its session details." }
-        return store.sessionDetails(id: id)
+        return store.sessionDetails(id: id) + "\n\n" + store.renewalSchedule(id: id,
+            enabled: RenewalPreferences.isEnabled(), leadDays: RenewalPreferences.leadDays())
     }
 
     func canRenew(_ row: ProfileRow) -> Bool {
@@ -154,7 +158,8 @@ final class AppModel: ObservableObject {
     func renewSession(id: UUID, automatically: Bool = false) async {
         guard !isWorking else { return }
         isWorking = true
-        defer { isWorking = false }
+        isRenewingSession = true
+        defer { isWorking = false; isRenewingSession = false }
         do {
             let executable = try codexCLIURL()
             let home = try store.renewalHome(id: id)
@@ -166,15 +171,15 @@ final class AppModel: ObservableObject {
             // Do not restore old credentials: a request can rotate tokens before failing.
             let message = (error as? SessionRenewalError)?.localizedDescription
                 ?? "Session renewal could not finish. Check that ChatGPT is installed and try again."
-            try? store.recordRenewal(id: id, status: message)
+            try? store.recordRenewal(id: id, status: message, failed: true)
             if !automatically { errorMessage = message }
         }
         reload()
     }
 
     func renewInactiveSessionIfNeeded() async {
-        guard !isWorking, UserDefaults.standard.bool(forKey: "renew_inactive_sessions"),
-              let id = store.nextRenewalID() else { return }
+        guard !isWorking, RenewalPreferences.isEnabled(),
+              let id = store.nextRenewalID(leadDays: RenewalPreferences.leadDays()) else { return }
         await renewSession(id: id, automatically: true)
     }
 
@@ -192,7 +197,8 @@ final class AppModel: ObservableObject {
                 lastLoadedAt: profile.lastLoadedAt,
                 isCurrent: currentID == profile.id,
                 isUnsavedCurrent: false,
-                plan: store.sessionMetadata(id: profile.id)?.plan
+                plan: store.sessionMetadata(id: profile.id)?.plan,
+                renewalWarning: profile.renewalFailed == true ? profile.renewalStatus : nil
             )
         }
 
@@ -877,7 +883,10 @@ final class ProfileStore {
                     ?? existingIndex.flatMap { profiles[$0].avatarColorToken }
                     ?? AvatarTintOption.blue.rawValue,
                 createdAt: existingIndex.map { profiles[$0].createdAt } ?? Date(),
-                lastLoadedAt: existingIndex.flatMap { profiles[$0].lastLoadedAt }
+                lastLoadedAt: existingIndex.flatMap { profiles[$0].lastLoadedAt },
+                lastRenewalAttemptAt: latest == previousSnapshot ? existingIndex.flatMap { profiles[$0].lastRenewalAttemptAt } : nil,
+                renewalStatus: latest == previousSnapshot ? existingIndex.flatMap { profiles[$0].renewalStatus } : nil,
+                renewalFailed: latest == previousSnapshot ? existingIndex.flatMap { profiles[$0].renewalFailed } : nil
             )
 
             if let existingIndex {
@@ -1085,19 +1094,32 @@ final class ProfileStore {
         return url.deletingLastPathComponent()
     }
 
-    func nextRenewalID(now: Date = Date()) -> UUID? {
+    func renewalSchedule(id: UUID, enabled: Bool, leadDays: Int, now: Date = Date()) -> String {
+        do { _ = try renewalHome(id: id) }
+        catch { return (error as? SessionRenewalError)?.localizedDescription ?? "Automatic renewal is unavailable with the current credential storage settings." }
+        guard enabled else { return "Automatic renewal is off. You can still renew this session manually." }
+        guard let profile = (try? loadProfiles())?.first(where: { $0.id == id }),
+              let date = sessionMetadata(id: id)?.scheduledRenewal(lastAttempt: profile.lastRenewalAttemptAt, leadDays: leadDays) else {
+            return "Automatic renewal cannot be scheduled without a token expiry date. Manual renewal is available."
+        }
+        let when = date <= now ? "Due now" : date.formatted(date: .abbreviated, time: .shortened)
+        return "Next automatic attempt: " + when + ". While this window is open; retries are at least one day apart."
+    }
+
+    func nextRenewalID(now: Date = Date(), leadDays: Int = 1) -> UUID? {
         guard let profiles = try? loadProfiles() else { return nil }
         return profiles.first { profile in
-            sessionMetadata(id: profile.id)?.needsRenewal(now: now, lastAttempt: profile.lastRenewalAttemptAt) == true
+            sessionMetadata(id: profile.id)?.needsRenewal(now: now, lastAttempt: profile.lastRenewalAttemptAt, leadDays: leadDays) == true
                 && (try? renewalHome(id: profile.id)) != nil
         }?.id
     }
 
-    func recordRenewal(id: UUID, status: String, now: Date = Date()) throws {
+    func recordRenewal(id: UUID, status: String, now: Date = Date(), failed: Bool = false) throws {
         var profiles = try loadProfiles()
         guard let index = profiles.firstIndex(where: { $0.id == id }) else { throw SessionRenewalError.unavailable }
         profiles[index].lastRenewalAttemptAt = now
         profiles[index].renewalStatus = status
+        profiles[index].renewalFailed = failed
         try save(profiles)
     }
 
@@ -1107,8 +1129,7 @@ final class ProfileStore {
         // A successful RPC alone does not prove that tokens were actually refreshed.
         guard renewed != previous, isCodexAuth(renewed), authIdentity(renewed) == authIdentity(previous),
               let expiry = SessionMetadata(data: renewed).expiresAt, expiry > Date(),
-              credentialDate(renewed) != credentialDate(previous)
-                || SessionMetadata(data: renewed).expiresAt != SessionMetadata(data: previous).expiresAt else {
+              SessionMetadata.credentialsChanged(from: previous, to: renewed) else {
             throw SessionRenewalError.unchanged
         }
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
@@ -1140,18 +1161,27 @@ final class ProfileStore {
 
     private func syncCurrentSnapshot(captureUnsaved: Bool = false) throws {
         guard let current = try? Data(contentsOf: authURL), isCodexAuth(current) else { return }
-        let profiles = try loadProfiles()
+        var profiles = try loadProfiles()
         if captureUnsaved, matchingIndex(for: current, in: profiles) == nil {
             _ = try captureCurrent(customName: nil, avatarSymbol: nil, avatarColorToken: nil, fallbackIndex: profiles.count + 1)
             return
         }
-        for profile in profiles {
+        var changed = false
+        for index in profiles.indices {
+            let profile = profiles[index]
             if let saved = try? Data(contentsOf: existingAuthURL(for: profile.id)),
                authIdentity(current) == authIdentity(saved), authIdentity(current) != nil {
                 let latest = newerCredentials(current, than: saved)
-                if latest != saved { try writeSecret(latest, to: snapshotAuthURL(for: profile.id)) }
+                if latest != saved {
+                    try writeSecret(latest, to: snapshotAuthURL(for: profile.id))
+                    profiles[index].lastRenewalAttemptAt = nil
+                    profiles[index].renewalStatus = nil
+                    profiles[index].renewalFailed = nil
+                    changed = true
+                }
             }
         }
+        if changed { try save(profiles) }
     }
 
     private var homeURL: URL {
@@ -1281,7 +1311,10 @@ final class ProfileStore {
                     ?? existingIndex.map { profiles[$0].createdAt }
                     ?? Date(),
                 lastLoadedAt: metadata?.lastLoadedAt
-                    ?? existingIndex.flatMap { profiles[$0].lastLoadedAt }
+                    ?? existingIndex.flatMap { profiles[$0].lastLoadedAt },
+                lastRenewalAttemptAt: latest == previousSnapshot ? existingIndex.flatMap { profiles[$0].lastRenewalAttemptAt } : nil,
+                renewalStatus: latest == previousSnapshot ? existingIndex.flatMap { profiles[$0].renewalStatus } : nil,
+                renewalFailed: latest == previousSnapshot ? existingIndex.flatMap { profiles[$0].renewalFailed } : nil
             )
 
             if let existingIndex {

@@ -24,6 +24,8 @@ struct ContentView: View {
                     ProfileRowView(
                         row: row,
                         hideEmails: hideEmails,
+                        canRenew: model.canRenew(row),
+                        isBusy: model.isWorking,
                         renameAction: {
                             guard let prompt = model.renamePrompt(for: row) else { return }
                             self.prompt = prompt
@@ -42,6 +44,10 @@ struct ContentView: View {
                             Task { await model.exportProfile(row) }
                         },
                         detailsAction: { sessionRow = row },
+                        renewAction: {
+                            sessionRow = row
+                            if let id = row.profileID { Task { await model.renewSession(id: id) } }
+                        },
                         signInAction: { Task { await model.startBrowserLoginProfile() } },
                         addAction: {
                             Task { await addCurrentProfile() }
@@ -83,6 +89,7 @@ struct ContentView: View {
                 .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 1.5, dash: [6, 6]))
                 .padding(10)
                 .opacity(isDropTargeted ? 0.9 : 0)
+                .allowsHitTesting(false)
                 .animation(.easeOut(duration: 0.15), value: isDropTargeted)
         }
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted, perform: handleDrop(providers:))
@@ -95,12 +102,13 @@ struct ContentView: View {
                     Label("Sign In New Profile", systemImage: "person.crop.circle.badge.plus")
                 }
                 .help("Add account with browser sign-in (⇧⌘N)")
+                .disabled(model.isWorking)
                 Button {
                     Task { await addCurrentProfile() }
                 } label: {
                     Label("Save Current Profile", systemImage: "tray.and.arrow.down")
                 }
-                .disabled(!model.currentProfile.isAvailable)
+                .disabled(model.isWorking || !model.currentProfile.isAvailable)
                 .help("Save current profile (⌘S)")
                 Button {
                     Task { await model.importProfileFromPanel() }
@@ -108,16 +116,17 @@ struct ContentView: View {
                     Label("Import Profiles", systemImage: "square.and.arrow.down")
                 }
                 .help("Import profiles or backup (⌘I)")
+                .disabled(model.isWorking)
                 Button {
                     Task { await model.logoutCodex() }
                 } label: {
                     Label("Sign Out Locally", systemImage: "rectangle.portrait.and.arrow.right")
                 }
-                .disabled(!model.currentProfile.isAvailable)
+                .disabled(model.isWorking || !model.currentProfile.isAvailable)
                 .help("Sign out locally, preserving the saved session")
             }
         }
-        .disabled(model.isWorking)
+        .disabled(model.isWorking && !model.isRenewingSession)
         .onReceive(NotificationCenter.default.publisher(for: .saveCurrentProfile)) { _ in
             guard !model.isWorking, prompt == nil else { return }
             Task { await addCurrentProfile() }
@@ -277,13 +286,15 @@ struct ContentView: View {
 private struct ProfileRowView: View {
     let row: ProfileRow
     let hideEmails: Bool
+    let canRenew: Bool
+    let isBusy: Bool
     @State private var confirmDelete = false
-    @State private var showProfileActions = false
     let renameAction: () -> Void
     let loadAction: () -> Void
     let deleteAction: () -> Void
     let exportAction: () -> Void
     let detailsAction: () -> Void
+    let renewAction: () -> Void
     let signInAction: () -> Void
     let addAction: () -> Void
 
@@ -312,6 +323,15 @@ private struct ProfileRowView: View {
                             .background((plan == "Free" ? Color.secondary : Color.accentColor).opacity(0.1), in: Capsule())
                             .fixedSize()
                             .help("Plan from saved account information")
+                    }
+                    if let warning = row.renewalWarning {
+                        Button(action: detailsAction) {
+                            Image(systemName: "exclamationmark.circle")
+                                .foregroundStyle(.orange)
+                        }
+                        .buttonStyle(.plain)
+                        .help(warning)
+                        .accessibilityLabel("Session renewal needs attention")
                     }
                 }
 
@@ -343,28 +363,21 @@ private struct ProfileRowView: View {
 
             if row.isUnsavedCurrent {
                 IconPill(symbol: "plus", action: addAction, help: "Save Current Profile")
+                    .disabled(isBusy)
             } else {
                 HStack(spacing: 6) {
-                    Button {
-                        showProfileActions = true
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .frame(width: 28, height: 28)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Profile actions")
-                    .popover(isPresented: $showProfileActions, arrowEdge: .bottom) {
-                        ProfileActionsPopover(
-                            edit: { performProfileAction(renameAction) },
-                            export: { performProfileAction(exportAction) },
-                            details: { performProfileAction(detailsAction) },
-                            signIn: { performProfileAction(signInAction) },
-                            delete: { performProfileAction { confirmDelete = true } }
-                        )
-                    }
+                    ProfileActionsMenu(actions: [
+                        .init(title: "Edit Profile", symbol: "pencil", enabled: !isBusy, action: renameAction),
+                        .init(title: "Export Profile", symbol: "square.and.arrow.up", enabled: !isBusy, action: exportAction),
+                        .init(title: "Session Details…", symbol: "info.circle", action: detailsAction),
+                        .init(title: "Renew Session", symbol: "arrow.clockwise", enabled: canRenew && !isBusy, action: renewAction),
+                        .init(title: "Sign In Again…", symbol: "person.crop.circle.badge.plus", enabled: !isBusy, action: signInAction),
+                        .init(title: "Delete Profile…", symbol: "trash", enabled: !isBusy, action: { confirmDelete = true })
+                    ])
+                    .frame(width: 28, height: 28)
                     IconPill(symbol: row.isCurrent ? "checkmark" : "arrow.left.arrow.right", action: loadAction,
                              help: row.isCurrent ? "Current profile" : "Switch to this profile")
-                        .disabled(row.isCurrent)
+                        .disabled(row.isCurrent || isBusy)
                 }
             }
         }
@@ -380,6 +393,7 @@ private struct ProfileRowView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(border, lineWidth: row.isCurrent ? 1 : 0.8)
+                .allowsHitTesting(false)
         )
     }
 
@@ -388,11 +402,6 @@ private struct ProfileRowView: View {
             return Color.accentColor.opacity(row.isUnsavedCurrent ? 0.05 : 0.09)
         }
         return Color(nsColor: .controlBackgroundColor)
-    }
-
-    private func performProfileAction(_ action: @escaping () -> Void) {
-        showProfileActions = false
-        DispatchQueue.main.async { action() }
     }
 
     private var border: Color {
@@ -444,6 +453,7 @@ private struct ProfileRowView: View {
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
         .help("Edit")
+        .disabled(isBusy)
     }
 }
 
@@ -607,40 +617,58 @@ private enum CompactDateFormatter {
     }()
 }
 
-private struct ProfileActionsPopover: View {
-    let edit: () -> Void
-    let export: () -> Void
-    let details: () -> Void
-    let signIn: () -> Void
-    let delete: () -> Void
+/// A real macOS menu with a full button hit area and no disclosure arrow.
+private struct ProfileActionsMenu: NSViewRepresentable {
+    struct Action {
+        let title: String
+        let symbol: String
+        var enabled = true
+        let action: () -> Void
+    }
+    let actions: [Action]
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            action("Edit Profile", symbol: "pencil", action: edit)
-            action("Export Profile", symbol: "square.and.arrow.up", action: export)
-            action("Session Details…", symbol: "info.circle", action: details)
-            action("Sign In Again…", symbol: "arrow.triangle.2.circlepath", action: signIn)
-            Divider().padding(.vertical, 4)
-            action("Delete Profile", symbol: "trash", role: .destructive, action: delete)
-        }
-        .padding(8)
-        .frame(width: 220)
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSButton {
+        let button = NSButton(image: NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "Profile actions")!,
+                              target: context.coordinator, action: #selector(Coordinator.showMenu(_:)))
+        button.isBordered = false
+        button.bezelStyle = .inline
+        button.toolTip = "Profile actions"
+        button.setAccessibilityLabel("Profile actions")
+        return button
     }
 
-    private func action(
-        _ title: String,
-        symbol: String,
-        role: ButtonRole? = nil,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(role: role, action: action) {
-            Label(title, systemImage: symbol)
-                .frame(maxWidth: .infinity, alignment: .leading)
+    func updateNSView(_ button: NSButton, context: Context) {
+        context.coordinator.actions = actions
+        button.isEnabled = context.environment.isEnabled
+    }
+
+    final class Coordinator: NSObject {
+        var actions: [Action] = []
+        private var displayedActions: [Action] = []
+
+        @objc func showMenu(_ sender: NSButton) {
+            displayedActions = actions
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            for (index, action) in displayedActions.enumerated() {
+                if index == displayedActions.count - 1 { menu.addItem(.separator()) }
+                let item = NSMenuItem(title: action.title, action: #selector(invoke(_:)), keyEquivalent: "")
+                item.target = self
+                item.tag = index
+                item.isEnabled = action.enabled
+                item.image = NSImage(systemSymbolName: action.symbol, accessibilityDescription: nil)
+                menu.addItem(item)
+            }
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
         }
-        .buttonStyle(.plain)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .contentShape(Rectangle())
+
+        @objc func invoke(_ sender: NSMenuItem) {
+            guard displayedActions.indices.contains(sender.tag) else { return }
+            let action = displayedActions[sender.tag].action
+            DispatchQueue.main.async(execute: action)
+        }
     }
 }
 
