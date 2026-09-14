@@ -361,6 +361,11 @@ private struct ProfileRowView: View {
                 }
 
                 HStack(spacing: 10) {
+                    if let number = row.shortcutNumber {
+                        Text("⌘\(number)").font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .help("Switch directly to this profile while Codex Profiles is active")
+                    }
                     if let createdAt = row.createdAt {
                         MetaChip(symbol: "square.and.arrow.down", text: compactDate(createdAt))
                     }
@@ -386,6 +391,7 @@ private struct ProfileRowView: View {
                         .init(title: "Delete Profile…", symbol: "trash", enabled: !isBusy, action: { confirmDelete = true })
                     ])
                     .frame(width: 28, height: 28)
+                    ResetBadge(count: row.usage?.availableResets)
                     QuotaSwitch(row: row, isBusy: isBusy, action: loadAction)
                 }
             }
@@ -477,6 +483,25 @@ private struct MetaChip: View {
         }
         .font(.system(size: 10))
         .foregroundStyle(.secondary)
+    }
+}
+
+struct ResetBadge: View {
+    let count: Int?
+
+    var body: some View {
+        if let count, count > 0 {
+            Text(String(count))
+                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5).frame(minWidth: 18, minHeight: 18)
+                .background(Color.primary.opacity(0.05), in: Capsule())
+                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
+                .fixedSize()
+                .help("Available limit resets: \(count)")
+                .accessibilityLabel("\(count) available limit resets")
+        }
     }
 }
 

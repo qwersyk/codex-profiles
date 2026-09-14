@@ -11,6 +11,11 @@ struct CodexProfilesApp: App {
     @AppStorage("sort_order") private var sortOrderRaw = SortOrder.recent.rawValue
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
+    private func shortcutTitle(_ row: ProfileRow) -> String {
+        let name = hideEmails && row.title.contains("@") ? "Profile " + (row.shortcutNumber.map(String.init) ?? String(row.id.prefix(4))) : row.title
+        return (row.isCurrent ? "✓ " : "") + name
+    }
+
     var body: some Scene {
         Window("Codex Profiles", id: "profiles") {
             ContentView(model: model)
@@ -73,12 +78,18 @@ struct CodexProfilesApp: App {
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                     .disabled(model.isWorking)
                 Divider()
-                Button("Previous Profile") { Task { await model.switchAdjacentProfile(-1) } }
-                    .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
-                    .disabled(model.isWorking)
-                Button("Next Profile") { Task { await model.switchAdjacentProfile(1) } }
-                    .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
-                    .disabled(model.isWorking)
+                Menu("Switch to Profile") {
+                    ForEach(model.rows(sortedBy: .created).filter { $0.profileID != nil }.reversed()) { row in
+                        if let number = row.shortcutNumber {
+                            Button(shortcutTitle(row)) { Task { await model.loadProfile(row) } }
+                                .keyboardShortcut(KeyEquivalent(Character(String(number))), modifiers: .command)
+                                .disabled(model.isWorking || row.isCurrent)
+                        } else {
+                            Button(shortcutTitle(row)) { Task { await model.loadProfile(row) } }
+                                .disabled(model.isWorking || row.isCurrent)
+                        }
+                    }
+                }
                 Button("Sign Out Locally") { Task { await model.logoutCodex() } }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
                     .disabled(model.isWorking)
@@ -121,6 +132,10 @@ private struct ProfileMenuBarView: View {
                                     } else { Text("Limits unavailable").font(.caption).foregroundStyle(.secondary) }
                                 }
                                 Spacer()
+                                ResetBadge(count: row.usage?.availableResets)
+                                if let number = row.shortcutNumber {
+                                    Text("⌘\(number)").font(.caption2).foregroundStyle(.tertiary)
+                                }
                                 Image(systemName: row.isSwitching ? "ellipsis" : row.isCurrent ? "checkmark" : "arrow.right")
                                     .foregroundStyle(row.usage?.indicatorWindows.first.map { quotaColor($0.remainingPercent) } ?? .secondary)
                             }
@@ -131,7 +146,10 @@ private struct ProfileMenuBarView: View {
                         .help(row.isCurrent ? "Current profile" : "Switch and restart ChatGPT")
                     }
                 }
-            }.frame(maxHeight: 320)
+            }
+            // A menu-bar popover proposes an unconstrained height. A ScrollView's
+            // intrinsic height is zero, so provide a concrete viewport for its rows.
+            .frame(height: min(320, CGFloat(model.profiles.count) * 64))
             if model.switchingProfileID != nil { Text("Switching · restarting ChatGPT…").font(.caption).foregroundStyle(.secondary) }
             if let error = model.errorMessage { Text(error).font(.caption).foregroundStyle(.red).lineLimit(3) }
             Divider()

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.11
+- Fix the collapsed menu bar profile list.
+- Add direct ⌘1–9 profile shortcuts and compact reset-count badges.
+
 ## 1.10
 - Add an optional menu bar panel for switching profiles and checking limits.
 - Clarify switching progress; use clockwise quota outlines and remaining-based colors.

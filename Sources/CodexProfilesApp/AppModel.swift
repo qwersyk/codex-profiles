@@ -48,6 +48,7 @@ struct ProfileRow: Identifiable, Equatable {
     var renewalWarning: String? = nil
     var usage: UsageSnapshot? = nil
     var isSwitching = false
+    var shortcutNumber: Int? = nil
 }
 
 enum SortOrder: String, CaseIterable, Identifiable {
@@ -291,6 +292,9 @@ final class AppModel: ObservableObject {
 
     func rows(sortedBy sortOrder: SortOrder) -> [ProfileRow] {
         let currentID = store.currentSavedProfileID()
+        let shortcutIDs = profiles.sorted {
+            $0.createdAt == $1.createdAt ? $0.id.uuidString < $1.id.uuidString : $0.createdAt < $1.createdAt
+        }.prefix(9).map(\.id)
         let savedRows = sortedProfiles(by: sortOrder).map { profile in
             return ProfileRow(
                 id: profile.id.uuidString,
@@ -307,7 +311,8 @@ final class AppModel: ObservableObject {
                 renewalWarning: profile.renewalRequiresSignIn == true ? "Sign in again to reconnect this profile."
                     : (profile.renewalFailed == true ? profile.renewalStatus : nil),
                 usage: profile.usage,
-                isSwitching: switchingProfileID == profile.id
+                isSwitching: switchingProfileID == profile.id,
+                shortcutNumber: shortcutIDs.firstIndex(of: profile.id).map { $0 + 1 }
             )
         }
 
