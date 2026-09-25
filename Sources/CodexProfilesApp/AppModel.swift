@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import CryptoKit
 import UniformTypeIdentifiers
+import RelayCore
 
 struct SavedProfile: Codable, Identifiable, Equatable {
     let id: UUID
@@ -186,6 +187,7 @@ final class AppModel: ObservableObject {
     }
 
     private let store = ProfileStore()
+    let remote = RemoteModel()
     private var loginController: CodexLoginController?
     @Published private(set) var switchingProfileID: UUID?
     private var maintenanceTask: Task<Void, Never>?
@@ -204,6 +206,31 @@ final class AppModel: ObservableObject {
 
     init() {
         reload()
+        remote.savedCredentials = { [weak self] id in
+            guard let self else { throw CancellationError() }
+            return try self.store.usageAuth(id: id)
+        }
+        remote.credentials = { [weak self] id in
+            guard let self else { throw CancellationError() }
+            while self.isWorking { try await Task.sleep(nanoseconds: 200_000_000) }
+            var data = try self.store.usageAuth(id: id)
+            let auth = try JSON(data: data)
+            let expiry = AccountProfile.claims(auth["tokens"]["access_token"].string ?? "")["exp"].int ?? 0
+            if Double(expiry) < Date().timeIntervalSince1970 + 600 {
+                if self.store.currentSavedProfileID() == id {
+                    if self.remote.runtimeReady {
+                        try await self.remote.refreshDesktopCredentials()
+                        try self.store.synchronizeSavedSession()
+                    }
+                } else {
+                    await self.renewSession(id: id, automatically: true)
+                }
+                try Task.checkCancellation()
+                data = try self.store.usageAuth(id: id)
+            }
+            return data
+        }
+        remote.restore()
     }
 
     func reload() {
@@ -429,6 +456,7 @@ final class AppModel: ObservableObject {
     func deleteProfile(id: UUID) async {
         await runTask {
             try self.store.deleteProfile(id: id)
+            self.remote.removeProfile(id)
             self.reload()
         }
     }
@@ -441,6 +469,12 @@ final class AppModel: ObservableObject {
         await runTask {
             try self.store.validateRestore(id: id)
             let shouldRelaunch = try await self.quitCodexIfRunning()
+            do { try await self.remote.prepareForDesktopChange() }
+            catch {
+                if shouldRelaunch { try? await self.launchCodex() }
+                throw error
+            }
+            defer { self.remote.finishDesktopChange() }
             do {
                 _ = try self.store.restoreProfile(id: id)
             } catch {
@@ -463,6 +497,12 @@ final class AppModel: ObservableObject {
         await runTask {
             try self.store.validateFileStorage()
             let shouldRelaunch = try await self.quitCodexIfRunning()
+            do { try await self.remote.prepareForDesktopChange() }
+            catch {
+                if shouldRelaunch { try? await self.launchCodex() }
+                throw error
+            }
+            defer { self.remote.finishDesktopChange() }
             do {
                 try self.store.signOutLocally()
             } catch {
@@ -647,7 +687,41 @@ final class AppModel: ObservableObject {
 
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
+        if remote.usesBridge {
+            let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/relay-cli")
+            guard FileManager.default.isExecutableFile(atPath: helper.path) else {
+                throw RelayError.message("Open the built Codex Profiles app to use Remote.")
+            }
+            var environment = remote.launchEnvironment
+            environment["CODEX_PROFILES_CLI"] = try codexCLIURL().path
+            if let home = ProcessInfo.processInfo.environment["CODEX_HOME"] { environment["CODEX_HOME"] = home }
+            configuration.environment = environment
+        }
         try await workspace.openApplication(at: appURL, configuration: configuration)
+    }
+
+    func openRemoteDesktop() async {
+        await runTask {
+            let apps = NSRunningApplication.runningApplications(withBundleIdentifier: ProfileStore.codexBundleID)
+            let probe = Process(), output = Pipe()
+            probe.executableURL = URL(fileURLWithPath: "/bin/ps")
+            probe.arguments = ["-axo", "ppid=,comm="]
+            probe.standardOutput = output; probe.standardError = FileHandle.nullDevice
+            try probe.run()
+            let children = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            probe.waitUntilExit()
+            let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/relay-cli").path
+            if let app = apps.first, children.split(separator: "\n").contains(where: {
+                let fields = $0.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+                return fields.count == 2 && Int32(fields[0]) == app.processIdentifier && fields[1] == helper
+            }) {
+                app.activate(options: [.activateAllWindows]); return
+            }
+            _ = try await self.quitCodexIfRunning()
+            try await self.remote.prepareForDesktopChange()
+            defer { self.remote.finishDesktopChange() }
+            try await self.launchCodex()
+        }
     }
 
     private func codexAppURL() throws -> URL {

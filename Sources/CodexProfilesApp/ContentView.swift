@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
+    @AppStorage("remote_view") private var remoteView = false
 
     @AppStorage("hide_emails") private var hideEmails = false
     @State private var searchText = ""
@@ -18,61 +19,14 @@ struct ContentView: View {
     @FocusState private var nameFocused: Bool
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 8) {
-                ForEach(rows) { row in
-                    ProfileRowView(
-                        row: row,
-                        hideEmails: hideEmails,
-                        canRenew: model.canRenew(row),
-                        isBusy: model.isWorking,
-                        renameAction: {
-                            guard let prompt = model.renamePrompt(for: row) else { return }
-                            self.prompt = prompt
-                            draftName = prompt.initialValue
-                            draftAvatarSymbol = prompt.initialAvatarSymbol
-                            draftAvatarColorToken = prompt.initialAvatarColorToken
-                        },
-                        loadAction: {
-                            Task { await model.loadProfile(row) }
-                        },
-                        deleteAction: {
-                            guard let id = row.profileID else { return }
-                            Task { await model.deleteProfile(id: id) }
-                        },
-                        exportAction: {
-                            Task { await model.exportProfile(row) }
-                        },
-                        detailsAction: { sessionRow = row },
-                        renewAction: {
-                            sessionRow = row
-                            if let id = row.profileID { Task { await model.renewSession(id: id) } }
-                        },
-                        signInAction: { Task { await model.startBrowserLoginProfile() } },
-                        addAction: {
-                            Task { await addCurrentProfile() }
-                        }
-                    )
-                }
-
-                if rows.isEmpty {
-                    Text(searchText.isEmpty ? "No saved profiles" : "No matching profiles")
-                        .font(.headline)
-                    Text("Sign in to add an account, or import a profile backup.")
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                    Image(systemName: "person.crop.circle.badge.plus")
-                        .font(.system(size: 22, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 80)
-                }
-            }
-            .padding(10)
+        Group {
+            if remoteView { RemoteView(model: model, remote: model.remote) }
+            else { profilesView }
         }
-        .frame(minWidth: 420, minHeight: 300)
+        .frame(minWidth: 420, minHeight: remoteView ? 160 : 300)
+        .background(RemoteWindowSizing(remote: remoteView))
         .safeAreaInset(edge: .top) {
-            if showSearch {
+            if showSearch && !remoteView {
                 TextField("Search profiles", text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .focused($searchFocused)
@@ -95,6 +49,11 @@ struct ContentView: View {
         .onDrop(of: [UTType.fileURL.identifier], isTargeted: $isDropTargeted, perform: handleDrop(providers:))
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
+                Button { remoteView.toggle() } label: {
+                    Label(remoteView ? "Profiles" : "Remote", systemImage: remoteView ? "person.crop.rectangle.stack" : "iphone.and.arrow.right.outward")
+                }
+                .help(remoteView ? "Show profiles" : "Show Remote")
+                .keyboardShortcut("m", modifiers: [.command, .shift])
                 Button {
                     Task { await model.startBrowserLoginProfile() }
                 } label: {
@@ -126,7 +85,7 @@ struct ContentView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if model.isWorking || !model.loadingUsage.isEmpty {
+            if !remoteView && (model.isWorking || !model.loadingUsage.isEmpty) {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.mini).frame(width: 12, height: 12)
                     Text(model.switchingProfileID != nil ? "Switching profile · restarting ChatGPT…" : model.isWorking ? "Working…" : "Updating limits…")
@@ -200,6 +159,61 @@ struct ContentView: View {
             }
         } message: {
             Text(model.errorMessage ?? "")
+        }
+    }
+
+    private var profilesView: some View {
+        ScrollView {
+            LazyVStack(spacing: 8) {
+                ForEach(rows) { row in
+                    ProfileRowView(
+                        row: row,
+                        hideEmails: hideEmails,
+                        canRenew: model.canRenew(row),
+                        isBusy: model.isWorking,
+                        renameAction: {
+                            guard let prompt = model.renamePrompt(for: row) else { return }
+                            self.prompt = prompt
+                            draftName = prompt.initialValue
+                            draftAvatarSymbol = prompt.initialAvatarSymbol
+                            draftAvatarColorToken = prompt.initialAvatarColorToken
+                        },
+                        loadAction: {
+                            Task { await model.loadProfile(row) }
+                        },
+                        deleteAction: {
+                            guard let id = row.profileID else { return }
+                            Task { await model.deleteProfile(id: id) }
+                        },
+                        exportAction: {
+                            Task { await model.exportProfile(row) }
+                        },
+                        detailsAction: { sessionRow = row },
+                        renewAction: {
+                            sessionRow = row
+                            if let id = row.profileID { Task { await model.renewSession(id: id) } }
+                        },
+                        signInAction: { Task { await model.startBrowserLoginProfile() } },
+                        addAction: {
+                            Task { await addCurrentProfile() }
+                        }
+                    )
+                }
+
+                if rows.isEmpty {
+                    Text(searchText.isEmpty ? "No saved profiles" : "No matching profiles")
+                        .font(.headline)
+                    Text("Sign in to add an account, or import a profile backup.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    Image(systemName: "person.crop.circle.badge.plus")
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 80)
+                }
+            }
+            .padding(10)
         }
     }
 
