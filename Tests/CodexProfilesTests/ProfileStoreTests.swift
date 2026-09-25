@@ -178,5 +178,6 @@ struct TestRunner {
             print("PASS: \(name)")
         }
         try await SessionRenewalTests.run()
+        try await RemoteTests.run()
     }
 }

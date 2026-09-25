@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct CodexProfilesApp: App {
     @StateObject private var model = AppModel()
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("show_menu_bar") private var showMenuBar = false
     @AppStorage("hide_emails") private var hideEmails = false
     @AppStorage("show_search") private var showSearch = false
@@ -26,6 +27,8 @@ struct CodexProfilesApp: App {
                     }
                 }
                 .task {
+                    appDelegate.reopenWindow = { openWindow(id: "profiles") }
+                    appDelegate.onTerminate = { model.remote.shutdown() }
                     appDelegate.setOpenHandler { urls in
                         Task { await model.importFiles(urls) }
                     }
@@ -182,8 +185,21 @@ private struct ProfileMenuBarView: View {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    var reopenWindow: (() -> Void)?
+    var onTerminate: (() -> Void)?
     private var pendingURLs: [URL] = []
     private var openHandler: (([URL]) -> Void)?
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { reopenWindow?() }
+        return true
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        onTerminate?()
+    }
 
     func setOpenHandler(_ handler: @escaping ([URL]) -> Void) {
         openHandler = handler

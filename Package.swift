@@ -8,10 +8,13 @@ let package = Package(
     ],
     products: [
         .executable(name: "CodexProfilesApp", targets: ["CodexProfilesApp"]),
+        .executable(name: "relay-cli", targets: ["RelayCLI"]),
     ],
     targets: [
+        .target(name: "RelayCore"),
+        .executableTarget(name: "RelayCLI", dependencies: ["RelayCore"]),
         .executableTarget(
-            name: "CodexProfilesApp"
+            name: "CodexProfilesApp", dependencies: ["RelayCore"]
         ),
     ]
 )
