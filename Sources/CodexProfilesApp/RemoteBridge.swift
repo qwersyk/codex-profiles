@@ -22,6 +22,7 @@ final class RemoteBridge: ObservableObject {
     private lazy var api = RemoteAPI(identity: identity, installationID: Self.installationID,
                                      name: "Codex Profiles · \(Host.current().localizedName ?? "Mac")")
     private var gateway: Gateway?
+    private var controlServer: LocalControlServer?
     private var pairingTask: Task<Void, Never>?
     private var monitorTask: Task<Void, Never>?
     private var monitor: ProcessChannel?
@@ -87,6 +88,7 @@ final class RemoteBridge: ObservableObject {
         UserDefaults.standard.set(false, forKey: "relayRemoteEnabled")
         pairingTask?.cancel(); pairingTask = nil; pairing = nil
         gateway?.stop(); gateway = nil
+        controlServer?.stop(); controlServer = nil
         connected = false; status = "Offline"
     }
 
@@ -95,11 +97,20 @@ final class RemoteBridge: ObservableObject {
         UserDefaults.standard.set(true, forKey: "relayRemoteEnabled")
         let bridge = Gateway(api: api, paths: paths)
         gateway = bridge
+        let control = LocalControlServer()
+        control.profileOptions = { [weak self] in self?.profileOptions?() ?? [] }
         bridge.profileOptions = { [weak self] in self?.profileOptions?() ?? [] }
         bridge.onProfileSwitch = { [weak self] id in
             guard let self, let onProfileSwitch = self.onProfileSwitch else { return "The Mac app is unavailable." }
             return await onProfileSwitch(id)
         }
+        control.onProfileSwitch = { [weak self] id in
+            guard let self, let onProfileSwitch = self.onProfileSwitch else { return "The Mac app is unavailable." }
+            return await onProfileSwitch(id)
+        }
+        control.start()
+        controlServer = control
+        bridge.profileControlURL = { [weak self] in self?.controlServer?.baseURL }
         bridge.onPeerCount = { [weak self] count in self?.peerCount = count }
         bridge.onDiagnostic = { [weak self] value in self?.status = value }
         bridge.onState = { [weak self] state in
@@ -267,7 +278,7 @@ struct RelayPairingSheet: View {
         VStack(spacing: 14) {
             Text("ChatGPT Remote on Your Phone").font(.headline)
             Text(Gateway.virtualControlEnabled
-                 ? "Pair ChatGPT Remote with this Mac. Relay adds a temporary Codex Profiles project with one Profiles & Limits control chat. It is generated in memory and is not saved as a Codex task. Send /accounts to see saved profiles and limits, then /use 2 to switch locally without model quota."
+                 ? "Pair ChatGPT Remote with this Mac. Relay adds a temporary Codex Profiles project with one Profiles & Limits control chat. It is generated in memory and is not saved as a Codex task. Open /accounts to see tappable profile links and limits; /use 2 remains available as a fallback."
                  : "Pass-through test: Remote shows the original Codex projects and chats. The profile control chat and its commands are temporarily disabled.")
                 .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
             Picker("Phone account", selection: $selectedID) {

@@ -9,6 +9,9 @@ import os
     public var onDiagnostic: ((String) -> Void)?
     public var profileOptions: (() -> [RemoteProfileOption])?
     public var onProfileSwitch: ((UUID) async -> String?)?
+    /// A LAN URL served by the macOS app. When present, the virtual chat
+    /// renders profile choices as tappable Markdown links.
+    public var profileControlURL: (() -> String?)?
     private let api: RemoteAPI
     private let paths: RelayPaths
     private let logger = Logger(subsystem: "io.github.qwersyk.codexprofiles", category: "RemoteGateway")
@@ -399,7 +402,7 @@ import os
         let now = floor(Date().timeIntervalSince1970)
         let item = JSON.object([
             "id": .string("01a0d5dc-9c00-7000-8000-000000000044"), "type": .string("agentMessage"),
-            "text": .string(Self.accountList(profileOptions?() ?? [])), "phase": .string("final_answer"),
+            "text": .string(Self.accountList(profileOptions?() ?? [], controlURL: profileControlURL?())), "phase": .string("final_answer"),
             "memoryCitation": .null, "delivery": .null, "questions": .null,
         ])
         return .object([
@@ -446,7 +449,7 @@ import os
         let replacement: String
         var switchTarget: UUID?
         if first == "/accounts" || first == "/profiles" {
-            replacement = Self.accountList(options)
+            replacement = Self.accountList(options, controlURL: profileControlURL?())
         } else if first == "/use", words.count == 2, let index = Int(words[1]), options.indices.contains(index - 1) {
             let target = options[index - 1]
             if target.isCurrent {
@@ -514,15 +517,25 @@ import os
         ])]), key: key)
     }
 
-    private static func accountList(_ options: [RemoteProfileOption]) -> String {
+    private static func accountList(_ options: [RemoteProfileOption], controlURL: String?) -> String {
         guard !options.isEmpty else { return "No saved Codex profiles were found. Add and save a profile in Codex Profiles on the Mac." }
         let rows = options.enumerated().map { index, profile in
             let active = profile.isCurrent ? " · **ACTIVE**" : ""
             let email = profile.email.map { " — \(markdownSafe($0))" } ?? ""
             let details = profile.details.map { "\n   \($0)" } ?? "\n   Limits not loaded yet."
-            return "\(index + 1). **\(markdownSafe(profile.name))**\(email)\(active)\(details)"
+            let action: String
+            if let controlURL {
+                let url = controlURL.replacingOccurrences(of: "%d", with: String(index + 1))
+                action = "\n   [\(profile.isCurrent ? "🟢 Active" : "🔵 Use this profile")](\(url))"
+            } else {
+                action = ""
+            }
+            return "\(index + 1). **\(markdownSafe(profile.name))**\(email)\(active)\(details)\(action)"
         }
-        return "## Codex Profiles\n\n" + rows.joined(separator: "\n\n") + "\n\nSend `/use N` to switch profiles (for example, `/use 2`). Limits are the latest readings saved on this Mac."
+        let hint = controlURL == nil
+            ? "Send `/use N` to switch profiles (for example, `/use 2`)."
+            : "Tap a profile link to switch it on the Mac, or send `/use N` as a fallback."
+        return "## Codex Profiles\n\n" + rows.joined(separator: "\n\n") + "\n\n\(hint) Limits are the latest readings saved on this Mac."
     }
 
     private static func markdownSafe(_ value: String) -> String {
