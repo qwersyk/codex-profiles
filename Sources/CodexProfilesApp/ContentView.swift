@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var draftAvatarSymbol = AvatarOption.person.rawValue
     @State private var draftAvatarColorToken = AvatarTintOption.blue.rawValue
     @State private var isDropTargeted = false
+    @State private var showChatGPTRemote = false
     @FocusState private var nameFocused: Bool
 
     var body: some View {
@@ -96,6 +97,13 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
+                    showChatGPTRemote = true
+                } label: {
+                    Label("ChatGPT Remote", systemImage: "iphone.radiowaves.left.and.right")
+                }
+                .help("Connect ChatGPT Remote from your phone")
+                .disabled(model.profiles.isEmpty || model.isWorking)
+                Button {
                     Task { await model.startBrowserLoginProfile() }
                 } label: {
                     Label("Sign In New Profile", systemImage: "person.crop.circle.badge.plus")
@@ -147,6 +155,11 @@ struct ContentView: View {
                 sessionRow = nil
                 Task { await model.startBrowserLoginProfile() }
             })
+        }
+        .sheet(isPresented: $showChatGPTRemote) {
+            RelayPairingSheet(relay: model.relayRemote, profiles: model.profiles,
+                              getAuth: { try model.authData(for: $0) },
+                              close: { showChatGPTRemote = false })
         }
         .sheet(item: $prompt) { prompt in
             NamePromptView(

@@ -24,11 +24,14 @@ rm "$ASSETS_DIR/icon-generator"
 
 cd "$ROOT_DIR"
 swift build "${SWIFT_BUILD_ARGS[@]}" -c release --product "$EXEC_NAME"
+swift build "${SWIFT_BUILD_ARGS[@]}" -c release --product "relay-cli"
 BIN_DIR="$(swift build "${SWIFT_BUILD_ARGS[@]}" -c release --show-bin-path)"
 
 rm -rf "$APP_DIR"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
+mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$APP_DIR/Contents/Helpers"
 cp "$BIN_DIR/$EXEC_NAME" "$APP_DIR/Contents/MacOS/$EXEC_NAME"
+cp "$BIN_DIR/relay-cli" "$APP_DIR/Contents/Helpers/relay-cli"
+chmod +x "$APP_DIR/Contents/Helpers/relay-cli"
 cp "$ICON_PATH" "$APP_DIR/Contents/Resources/CodexProfiles.icns"
 
 cat > "$APP_DIR/Contents/Info.plist" <<'EOF'

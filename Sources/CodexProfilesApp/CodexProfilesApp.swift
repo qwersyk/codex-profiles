@@ -19,6 +19,9 @@ struct CodexProfilesApp: App {
     var body: some Scene {
         Window("Codex Profiles", id: "profiles") {
             ContentView(model: model)
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    model.relayRemote.shutdown()
+                }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                     Task {
                         try? await Task.sleep(nanoseconds: 200_000_000)
