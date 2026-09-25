@@ -117,33 +117,3 @@ private struct RemotePairingView: View {
         return NSImage(cgImage: image, size: output.extent.size)
     }
 }
-
-
-/// Keep the same window and toolbar, remembering the profile list's previous size.
-struct RemoteWindowSizing: NSViewRepresentable {
-    let remote: Bool
-    func makeNSView(context: Context) -> SizingView { SizingView() }
-    func updateNSView(_ view: SizingView, context: Context) {
-        view.remote = remote
-        DispatchQueue.main.async { view.apply() }
-    }
-    final class SizingView: NSView {
-        var remote = false
-        private var applied = false
-        private var profilesFrame: NSRect?
-        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); apply() }
-        func apply() {
-            guard let window, remote != applied, !window.styleMask.contains(.fullScreen) else { return }
-            applied = remote
-            if remote {
-                profilesFrame = window.frame
-                let size = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: 480, height: 180)).size
-                let frame = NSRect(x: window.frame.midX - size.width / 2, y: window.frame.maxY - size.height,
-                                   width: size.width, height: size.height)
-                window.setFrame(frame, display: true, animate: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
-            } else if let profilesFrame {
-                window.setFrame(profilesFrame, display: true, animate: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
-            }
-        }
-    }
-}

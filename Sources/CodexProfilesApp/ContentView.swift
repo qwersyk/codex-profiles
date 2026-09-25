@@ -23,8 +23,7 @@ struct ContentView: View {
             if remoteView { RemoteView(model: model, remote: model.remote) }
             else { profilesView }
         }
-        .frame(minWidth: 420, minHeight: remoteView ? 160 : 300)
-        .background(RemoteWindowSizing(remote: remoteView))
+        .frame(minWidth: 420, minHeight: 300)
         .safeAreaInset(edge: .top) {
             if showSearch && !remoteView {
                 TextField("Search profiles", text: $searchText)
@@ -50,7 +49,7 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { remoteView.toggle() } label: {
-                    Label(remoteView ? "Profiles" : "Remote", systemImage: remoteView ? "person.crop.rectangle.stack" : "iphone.and.arrow.right.outward")
+                    Label(remoteView ? "Profiles" : "Remote", systemImage: remoteView ? "person.crop.rectangle.stack" : "arrow.triangle.2.circlepath")
                 }
                 .help(remoteView ? "Show profiles" : "Show Remote")
                 .keyboardShortcut("m", modifiers: [.command, .shift])
