@@ -49,7 +49,7 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { remoteView.toggle() } label: {
-                    Label(remoteView ? "Profiles" : "Remote", systemImage: remoteView ? "person.crop.rectangle.stack" : "arrow.triangle.2.circlepath")
+                    Label(remoteView ? "Profiles" : "Remote", systemImage: remoteView ? "person.crop.rectangle.stack" : "link")
                 }
                 .help(remoteView ? "Show profiles" : "Show Remote")
                 .keyboardShortcut("m", modifiers: [.command, .shift])
