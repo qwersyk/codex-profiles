@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import CryptoKit
 import UniformTypeIdentifiers
+import RelayCore
 
 struct SavedProfile: Codable, Identifiable, Equatable {
     let id: UUID
@@ -124,6 +125,7 @@ final class AppModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var browserLogin: BrowserLoginState?
     @Published private(set) var usageErrors: [UUID: String] = [:]
+    let relayRemote = RemoteBridge()
 
     @Published private(set) var loadingUsage: Set<UUID> = []
     private var usageAttempts: [UUID: Date] = [:]
@@ -203,6 +205,34 @@ final class AppModel: ObservableObject {
     }
 
     init() {
+        relayRemote.profileOptions = { [weak self] in
+            guard let self else { return [] }
+            let savedRows = self.rows(sortedBy: .created).filter { $0.profileID != nil }
+            return savedRows.enumerated().compactMap { index, row in
+                guard let id = row.profileID else { return nil }
+                let customName = self.profiles.first(where: { $0.id == id })?.customName?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let name = customName.flatMap { $0.isEmpty ? nil : $0 } ?? "Profile \(index + 1)"
+                let limits = row.usage?.indicatorWindows.map { window in
+                    "\(window.durationLabel): \(Int(window.remainingPercent.rounded()))% left"
+                }.joined(separator: " · ")
+                let usageAge = row.usage.map { snapshot in
+                    "updated \(snapshot.fetchedAt.formatted(date: .omitted, time: .shortened))\(snapshot.isStale ? " (stale)" : "")"
+                }
+                let details = [row.plan, limits, usageAge, row.renewalWarning].compactMap { $0 }.joined(separator: " · ")
+                return RemoteProfileOption(id: id, name: name, email: row.email, isCurrent: row.isCurrent,
+                                           details: details.isEmpty ? nil : details)
+            }
+        }
+        relayRemote.onProfileSwitch = { [weak self] id in
+            guard let self else { return "The Mac app is unavailable." }
+            guard !self.isWorking else { return "Codex Profiles is busy. Try again shortly." }
+            guard let row = self.rows(sortedBy: .created).first(where: { $0.profileID == id }) else {
+                return "This saved profile is no longer available."
+            }
+            guard !row.isCurrent else { return nil }
+            await self.loadProfile(row)
+            return self.errorMessage
+        }
         reload()
     }
 
@@ -234,6 +264,10 @@ final class AppModel: ObservableObject {
         guard let id = row.profileID else { return "Save this profile to view its session details." }
         return store.sessionDetails(id: id) + "\n\n" + store.renewalSchedule(id: id,
             enabled: RenewalPreferences.isEnabled(), leadDays: RenewalPreferences.leadDays())
+    }
+
+    func authData(for id: UUID) throws -> Data {
+        try store.savedAuthData(id: id)
     }
 
     func canRenew(_ row: ProfileRow) -> Bool {
@@ -439,21 +473,25 @@ final class AppModel: ObservableObject {
         defer { switchingProfileID = nil }
         let outgoing = store.currentSavedProfileID()
         await runTask {
+            defer { self.reload() }
             try self.store.validateRestore(id: id)
             let shouldRelaunch = try await self.quitCodexIfRunning()
+            let remoteWasRunning = self.relayRemote.runtimeReady
+            var didLaunch = false
             do {
+                try await self.relayRemote.stopRuntimeForProfileSwitch()
                 _ = try self.store.restoreProfile(id: id)
+                if shouldRelaunch || remoteWasRunning {
+                    try await self.launchCodex()
+                    didLaunch = true
+                    try await self.relayRemote.verifyRuntimeAccount(email: row.email)
+                }
             } catch {
-                if shouldRelaunch {
+                if shouldRelaunch && !didLaunch {
                     try? await self.launchCodex()
                 }
                 throw error
             }
-
-            if shouldRelaunch {
-                try await self.launchCodex()
-            }
-            self.reload()
         }
         if let outgoing { enqueueUsage(outgoing) }
         enqueueUsage(id)
@@ -630,7 +668,18 @@ final class AppModel: ObservableObject {
             _ = app.terminate()
         }
 
-        for _ in 0..<40 {
+        for _ in 0..<20 {
+            if NSRunningApplication.runningApplications(withBundleIdentifier: ProfileStore.codexBundleID).isEmpty {
+                try await Task.sleep(nanoseconds: 500_000_000)
+                return true
+            }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: ProfileStore.codexBundleID) {
+            _ = app.forceTerminate()
+        }
+        for _ in 0..<20 {
             if NSRunningApplication.runningApplications(withBundleIdentifier: ProfileStore.codexBundleID).isEmpty {
                 try await Task.sleep(nanoseconds: 500_000_000)
                 return true
@@ -647,6 +696,12 @@ final class AppModel: ObservableObject {
 
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
+        if UserDefaults.standard.bool(forKey: "relayRemoteEnabled") {
+            let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/relay-cli")
+            if FileManager.default.isExecutableFile(atPath: helper.path) {
+                configuration.environment = ["CODEX_CLI_PATH": helper.path, "CODEX_APP_SERVER_FORCE_CLI": "1"]
+            }
+        }
         try await workspace.openApplication(at: appURL, configuration: configuration)
     }
 
@@ -956,6 +1011,12 @@ final class ProfileStore {
         guard fileManager.fileExists(atPath: indexURL.path) else { return [] }
         let data = try Data(contentsOf: indexURL)
         return try decoder.decode([SavedProfile].self, from: data)
+    }
+
+    func savedAuthData(id: UUID) throws -> Data {
+        let data = try Data(contentsOf: existingAuthURL(for: id))
+        guard isCodexAuth(data) else { throw StoreError.invalidAuthFile }
+        return data
     }
 
     func currentSavedProfileID() -> UUID? {
