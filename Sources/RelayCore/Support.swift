@@ -44,12 +44,23 @@ public struct RelayPaths {
     public var identity: URL { root.appendingPathComponent("Identity", isDirectory: true) }
     public var socket: URL { root.appendingPathComponent("run/runtime.sock") }
     public var runtimePID: URL { root.appendingPathComponent("run/runtime.pid") }
+    public var cliCandidates: [String] {
+        var candidates: [String] = []
+        if let path = ProcessInfo.processInfo.environment["CODEX_PROFILES_CLI"],
+           FileManager.default.isExecutableFile(atPath: path) { candidates.append(path) }
+        candidates += ["/Applications/ChatGPT.app", "/Applications/Codex.app"].flatMap { app in
+            [
+                app + "/Contents/Resources/codex-cli/bin/codex",
+                app + "/Contents/Resources/codex-cli/bin/../CodexCLI.app/Contents/MacOS/codex",
+                app + "/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+                app + "/Contents/Resources/codex",
+            ]
+        }
+        return candidates
+    }
     public var cli: String {
-        if let path = ProcessInfo.processInfo.environment["CODEX_PROFILES_CLI"] { return path }
-        return ["/Applications/ChatGPT.app", "/Applications/Codex.app"]
-            .map { $0 + "/Contents/Resources/codex" }
-            .first { FileManager.default.isExecutableFile(atPath: $0) }
-            ?? "/Applications/ChatGPT.app/Contents/Resources/codex"
+        cliCandidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+            ?? "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"
     }
     public func prepare() throws {
         for url in [root, identity, socket.deletingLastPathComponent()] {

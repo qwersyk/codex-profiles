@@ -167,6 +167,22 @@ enum SessionRenewalTests {
         XCTAssertEqual(cached?.windows.count, 1)
         XCTAssertEqual(cached?.windows[0].remainingPercent, 75)
         precondition(abs(cached!.fetchedAt.timeIntervalSince(parsed.fetchedAt)) < 1)
+        for duration in [300, 10080, 43200] {
+            let start = Date(timeIntervalSince1970: 1_800_000_000)
+            let reset = start.addingTimeInterval(Double(duration) * 60)
+            let window = UsageWindow(id: "reset", bucket: "codex", usedPercent: 25,
+                                     durationMinutes: duration, resetsAt: reset)
+            XCTAssertEqual(window.resetProgress(at: start), 0)
+            XCTAssertEqual(window.resetProgress(at: start.addingTimeInterval(Double(duration) * 30)), 0.5)
+            XCTAssertEqual(window.resetProgress(at: reset.addingTimeInterval(10)), 1)
+            XCTAssertEqual(window.resetProgress(at: start.addingTimeInterval(-10)), 0)
+            XCTAssertEqual(window.resetCountdown(at: reset), "Reset due")
+            XCTAssertEqual(window.resetCountdown(at: reset.addingTimeInterval(-90)), "Reset in 2m")
+        }
+        let unknownReset = UsageWindow(id: "unknown", bucket: "codex", usedPercent: 0,
+                                       durationMinutes: nil, resetsAt: nil)
+        XCTAssertEqual(unknownReset.resetProgress(at: Date()), nil)
+        XCTAssertEqual(unknownReset.resetCountdown(at: Date()), nil)
         print("PASS: Usage buckets, missing windows, remaining percentage, and cache")
 
         let usageCLI = try script(suite, """

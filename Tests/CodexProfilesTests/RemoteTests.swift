@@ -57,6 +57,12 @@ import Darwin
         catch { }
         XCTAssertEqual(sleeper.isRunning, true)
         print("PASS: runtime shutdown rejects unrelated processes")
+        sleeper.terminate()
+        sleeper.waitUntilExit()
+        try await RuntimeProcess.stop(paths: paths)
+        XCTAssertEqual(FileManager.default.fileExists(atPath: paths.runtimePID.path), false)
+        try await RuntimeProcess.stop(paths: paths)
+        print("PASS: exited runtime record is cleaned up and shutdown is repeatable")
         try await runtimeSwitch()
     }
 

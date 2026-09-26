@@ -25,7 +25,12 @@ func ensureRuntime(_ paths: RelayPaths, args: [String]) throws {
     guard lockFD >= 0 else { throw RelayError.message("Could not open startup lock.") }
     defer { flock(lockFD, LOCK_UN); close(lockFD) }
     guard flock(lockFD, LOCK_EX) == 0 else { throw RelayError.message("Could not acquire startup lock.") }
-    if reachable(paths.socket.path) { return }
+    if reachable(paths.socket.path) {
+        if let pid = RuntimeProcess.processID(paths: paths) {
+            try? RelayPaths.privateWrite(Data(String(pid).utf8), to: paths.runtimePID)
+        }
+        return
+    }
     // Only remove our own stale socket, never another user's endpoint or a symlink.
     var st = stat()
     if lstat(paths.socket.path, &st) == 0 {

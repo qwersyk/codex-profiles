@@ -4,6 +4,7 @@ import SwiftUI
 struct CodexProfilesApp: App {
     @StateObject private var model = AppModel()
     @Environment(\.openWindow) private var openWindow
+    @AppStorage("restart_on_profile_switch") private var restartOnProfileSwitch = false
     @AppStorage("show_menu_bar") private var showMenuBar = false
     @AppStorage("hide_emails") private var hideEmails = false
     @AppStorage("show_search") private var showSearch = false
@@ -28,7 +29,7 @@ struct CodexProfilesApp: App {
                 }
                 .task {
                     appDelegate.reopenWindow = { openWindow(id: "profiles") }
-                    appDelegate.onTerminate = { model.remote.shutdown() }
+                    appDelegate.onTerminate = { model.liveSwitch.close(); model.remote.shutdown() }
                     appDelegate.setOpenHandler { urls in
                         Task { await model.importFiles(urls) }
                     }
@@ -84,6 +85,13 @@ struct CodexProfilesApp: App {
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                     .disabled(model.isWorking)
                 Divider()
+                Toggle("Restart ChatGPT When Switching", isOn: $restartOnProfileSwitch)
+                Menu("Switch with Restart") {
+                    ForEach(model.rows(sortedBy: SortOrder(rawValue: sortOrderRaw) ?? .recent).filter { $0.profileID != nil }) { row in
+                        Button(shortcutTitle(row)) { Task { await model.loadProfile(row, forceRestart: true) } }
+                            .disabled(model.isWorking)
+                    }
+                }
                 Menu("Switch to Profile") {
                     ForEach(model.rows(sortedBy: SortOrder(rawValue: sortOrderRaw) ?? .recent).filter { $0.profileID != nil }) { row in
                         if let number = row.shortcutNumber {
@@ -109,6 +117,7 @@ struct CodexProfilesApp: App {
 }
 
 private struct ProfileMenuBarView: View {
+    @AppStorage("restart_on_profile_switch") private var restartOnProfileSwitch = false
     @ObservedObject var model: AppModel
     @AppStorage("sort_order") private var sortOrderRaw = SortOrder.recent.rawValue
     @AppStorage("hide_emails") private var hideEmails = false
@@ -156,14 +165,14 @@ private struct ProfileMenuBarView: View {
                             if hovering { hoveredProfileID = row.id }
                             else if hoveredProfileID == row.id { hoveredProfileID = nil }
                         }
-                        .help(row.isCurrent ? "Current profile" : "Switch and restart ChatGPT")
+                        .help(row.isCurrent ? "Current profile" : !restartOnProfileSwitch ? "Switch without restart" : "Switch and restart ChatGPT")
                     }
                 }
             }
             // A menu-bar popover proposes an unconstrained height. A ScrollView's
             // intrinsic height is zero, so provide a concrete viewport for its rows.
             .frame(height: min(300, CGFloat(model.profiles.count) * 48))
-            if model.switchingProfileID != nil { Text("Switching · restarting ChatGPT…").font(.caption).foregroundStyle(.secondary) }
+            if model.switchingProfileID != nil { Text(!restartOnProfileSwitch ? "Switching account…" : "Switching · restarting ChatGPT…").font(.caption).foregroundStyle(.secondary) }
             if let error = model.errorMessage { Text(error).font(.caption).foregroundStyle(.red).lineLimit(3) }
             Divider()
             HStack {
