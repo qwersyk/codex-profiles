@@ -191,6 +191,7 @@ final class AppModel: ObservableObject {
 
     private let store = ProfileStore()
     let remote = RemoteModel()
+    let liveSwitch = LiveProfileSwitch()
     private var loginController: CodexLoginController?
     @Published private(set) var switchingProfileID: UUID?
     private var maintenanceTask: Task<Void, Never>?
@@ -208,6 +209,24 @@ final class AppModel: ObservableObject {
     }
 
     init() {
+        liveSwitch.onFailure = { [weak self] message in self?.errorMessage = message }
+        liveSwitch.renew = { [weak self] id in
+            guard let self, !self.isWorking, self.liveSwitch.profileID == id,
+                  self.store.currentSavedProfileID() == id else { throw CancellationError() }
+            self.isWorking = true
+            defer { self.isWorking = false; self.reload() }
+            let home = try self.store.renewalHome(id: id, externallyManaged: true)
+            let before = try Data(contentsOf: home.appendingPathComponent("auth.json"))
+            do {
+                try await SessionRenewal.renew(executable: self.codexCLIURL(), home: home, timeout: 7)
+                try self.store.completeLiveRenewal(id: id, previous: before)
+            } catch {
+                // Preserve any rotated token even when the RPC times out.
+                try? self.store.completeLiveRenewal(id: id, previous: before)
+                throw error
+            }
+            return try self.store.usageAuth(id: id)
+        }
         reload()
         remote.savedCredentials = { [weak self] id in
             guard let self else { throw CancellationError() }
@@ -221,7 +240,9 @@ final class AppModel: ObservableObject {
             let expiry = AccountProfile.claims(auth["tokens"]["access_token"].string ?? "")["exp"].int ?? 0
             if Double(expiry) < Date().timeIntervalSince1970 + 600 {
                 if self.store.currentSavedProfileID() == id {
-                    if self.remote.runtimeReady {
+                    if self.liveSwitch.profileID == id {
+                        try await self.liveSwitch.refreshCurrentCredentials()
+                    } else if self.remote.runtimeReady {
                         try await self.remote.refreshDesktopCredentials()
                         try self.store.synchronizeSavedSession()
                     }
@@ -520,14 +541,40 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func loadProfile(_ row: ProfileRow) async {
-        guard let id = row.profileID, !row.isCurrent, !isWorking else { return }
+    private func loadProfileWithoutRestart(id: UUID) async {
+        switchingProfileID = id
+        defer { switchingProfileID = nil }
+        await runTask {
+            guard self.remote.desktopReady, await self.remote.desktopIsAttached(),
+                  let previousID = self.store.currentSavedProfileID() else {
+                throw RelayError.message("Live switching requires Remote, an attached ChatGPT app, and a saved current profile. Use Switch with Restart once to connect them.")
+            }
+            try self.store.validateRestore(id: id)
+            let previous = try self.store.usageAuth(id: previousID)
+            let target = try self.store.usageAuth(id: id)
+            try await self.liveSwitch.switchAccount(to: id, data: target, previousID: previousID,
+                                                    previous: previous, paths: self.remote.paths) {
+                _ = try self.store.restoreProfile(id: id)
+            }
+            self.reload()
+        }
+        enqueueUsage(id)
+    }
+
+    func loadProfile(_ row: ProfileRow, forceRestart: Bool = false) async {
+        guard let id = row.profileID, (!row.isCurrent || forceRestart), !isWorking else { return }
+        if !forceRestart, !UserDefaults.standard.bool(forKey: "restart_on_profile_switch"),
+           remote.desktopReady, store.currentSavedProfileID() != nil {
+            await loadProfileWithoutRestart(id: id)
+            return
+        }
         switchingProfileID = id
         defer { switchingProfileID = nil }
         let outgoing = store.currentSavedProfileID()
         await runTask {
             try self.store.validateRestore(id: id)
             let shouldRelaunch = try await self.quitCodexIfRunning()
+            self.liveSwitch.close()
             do { try await self.remote.prepareForDesktopChange() }
             catch {
                 if shouldRelaunch { try? await self.launchCodex() }
@@ -556,6 +603,7 @@ final class AppModel: ObservableObject {
         await runTask {
             try self.store.validateFileStorage()
             let shouldRelaunch = try await self.quitCodexIfRunning()
+            self.liveSwitch.close()
             do { try await self.remote.prepareForDesktopChange() }
             catch {
                 if shouldRelaunch { try? await self.launchCodex() }
@@ -1353,7 +1401,7 @@ final class ProfileStore {
         })
     }
 
-    func renewalHome(id: UUID) throws -> URL {
+    func renewalHome(id: UUID, externallyManaged: Bool = false) throws -> URL {
         try validateFileStorage()
         if try loadProfiles().first(where: { $0.id == id })?.renewalRequiresSignIn == true {
             throw SessionRenewalError.signInRequired
@@ -1362,7 +1410,7 @@ final class ProfileStore {
         let data = try Data(contentsOf: url)
         let metadata = SessionMetadata(data: data)
         guard metadata.isManaged else { throw SessionRenewalError.unavailable }
-        if let current = try? Data(contentsOf: authURL),
+        if !externallyManaged, let current = try? Data(contentsOf: authURL),
            (authIdentity(current) == authIdentity(data) || SessionMetadata(data: current).refreshToken == metadata.refreshToken) {
             throw SessionRenewalError.active
         }
@@ -1427,6 +1475,14 @@ final class ProfileStore {
         }
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         try recordRenewal(id: id, status: "Session renewed. This does not extend the subscription.")
+    }
+
+    /// Only the live external-auth owner may renew the active profile.
+    func completeLiveRenewal(id: UUID, previous: Data) throws {
+        try completeRenewal(id: id, previous: previous)
+        guard currentSavedProfileID() == id else { throw SessionRenewalError.active }
+        let renewed = try Data(contentsOf: existingAuthURL(for: id))
+        try writeSecret(renewed, to: authURL)
     }
 
     private func credentialDate(_ data: Data) -> Date? {

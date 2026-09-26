@@ -8,6 +8,29 @@ struct UsageWindow: Codable, Equatable, Identifiable {
     let resetsAt: Date?
 
     var remainingPercent: Double { max(0, min(100, 100 - usedPercent)) }
+
+    func resetProgress(at date: Date) -> Double? {
+        guard let minutes = durationMinutes, minutes > 0, let reset = resetsAt,
+              reset.timeIntervalSince1970.isFinite else { return nil }
+        let duration = Double(minutes) * 60
+        return max(0, min(1, 1 - reset.timeIntervalSince(date) / duration))
+    }
+
+    func resetCountdown(at date: Date) -> String? {
+        guard let reset = resetsAt, reset.timeIntervalSince1970.isFinite else { return nil }
+        let seconds = reset.timeIntervalSince(date)
+        guard seconds > 0 else { return "Reset due" }
+        let minutes = ceil(seconds / 60)
+        guard minutes < Double(Int.max) else { return "Reset time unavailable" }
+        if minutes >= 1440 {
+            return "Reset in \(Int(minutes / 1440))d \(Int(minutes.truncatingRemainder(dividingBy: 1440) / 60))h"
+        }
+        if minutes >= 60 {
+            return "Reset in \(Int(minutes / 60))h \(Int(minutes.truncatingRemainder(dividingBy: 60)))m"
+        }
+        return "Reset in \(Int(minutes))m"
+    }
+
     var durationLabel: String {
         guard let minutes = durationMinutes else { return "Usage" }
         if minutes % 1440 == 0 { return "\(minutes / 1440)d" }

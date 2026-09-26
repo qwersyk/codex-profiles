@@ -13,6 +13,7 @@ swiftc "${SDK_ARGS[@]}" -I "$ROOT_DIR/.build/tests" -L "$ROOT_DIR/.build/tests" 
     -Xlinker -rpath -Xlinker "$ROOT_DIR/.build/tests" -o "$ROOT_DIR/.build/tests/profile-tests" \
     "$ROOT_DIR/Sources/CodexProfilesApp/AppModel.swift" \
     "$ROOT_DIR/Sources/CodexProfilesApp/RemoteModel.swift" \
+    "$ROOT_DIR/Sources/CodexProfilesApp/LiveProfileSwitch.swift" \
     "$ROOT_DIR/Sources/CodexProfilesApp/RemoteView.swift" \
     "$ROOT_DIR/Sources/CodexProfilesApp/SessionRenewal.swift" \
     "$ROOT_DIR/Sources/CodexProfilesApp/AccountUsage.swift" \
