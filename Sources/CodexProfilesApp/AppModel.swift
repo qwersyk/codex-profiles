@@ -130,6 +130,7 @@ final class AppModel: ObservableObject {
     private var usageAttempts: [UUID: Date] = [:]
     private var usageQueue: [UUID] = []
     private var usageWorker: Task<Void, Never>?
+    private var remoteAccountActionInProgress = false
 
     func refreshUsage(all: Bool = false, force: Bool = false) {
         guard !isWorking else { return }
@@ -232,7 +233,63 @@ final class AppModel: ObservableObject {
             }
             return data
         }
+        remote.accountChoices = { [weak self] in self?.remoteAccountChoices() ?? [] }
+        remote.refreshAccountLimits = { [weak self] in
+            guard let self else { return "The Mac app is unavailable." }
+            guard !self.isWorking, !self.remoteAccountActionInProgress else {
+                return "Codex Profiles is busy. Try again shortly."
+            }
+            self.remoteAccountActionInProgress = true
+            defer { self.remoteAccountActionInProgress = false }
+            let savedRows = self.rows(sortedBy: .created).filter { $0.profileID != nil }
+            for row in savedRows {
+                guard !self.isWorking else { return "Codex Profiles is busy. Try again shortly." }
+                if let id = row.profileID, self.loadingUsage.contains(id) {
+                    // Reuse an in-flight limit read instead of returning its old cache.
+                    while self.loadingUsage.contains(id) {
+                        do { try await Task.sleep(nanoseconds: 50_000_000) }
+                        catch { return "Limit refresh was interrupted. Try again." }
+                        guard !self.isWorking else { return "Codex Profiles is busy. Try again shortly." }
+                    }
+                } else {
+                    await self.loadUsage(for: row)
+                }
+            }
+            let failed = savedRows.contains { row in
+                row.profileID.map { self.usageErrors[$0] != nil } ?? false
+            }
+            return failed ? "Some limits could not be refreshed. Try again." : nil
+        }
+        remote.selectDesktopAccount = { [weak self] id in
+            guard let self else { return "The Mac app is unavailable." }
+            guard !self.isWorking, !self.remoteAccountActionInProgress else {
+                return "Codex Profiles is busy. Try again shortly."
+            }
+            guard let row = self.rows(sortedBy: .created).first(where: { $0.profileID == id }) else {
+                return "This saved profile is no longer available."
+            }
+            guard !row.isCurrent else { return nil }
+            self.remoteAccountActionInProgress = true
+            defer { self.remoteAccountActionInProgress = false }
+            await self.loadProfile(row)
+            return self.errorMessage
+        }
         remote.restore()
+    }
+
+    private func remoteAccountChoices() -> [RemoteAccountChoice] {
+        rows(sortedBy: .created).enumerated().compactMap { index, row in
+            guard let id = row.profileID else { return nil }
+            let limits = row.usage?.indicatorWindows.map { window in
+                "\(window.durationLabel): \(Int(window.remainingPercent.rounded()))% left"
+            }.joined(separator: " · ")
+            let detail = [row.plan, limits, row.renewalWarning]
+                .compactMap { $0 }.joined(separator: " · ")
+            let title = row.title.isEmpty ? "Profile \(index + 1)" : row.title
+            return RemoteAccountChoice(id: id, title: title,
+                                       detail: detail.isEmpty ? nil : detail,
+                                       isCurrent: row.isCurrent)
+        }
     }
 
     func reload() {

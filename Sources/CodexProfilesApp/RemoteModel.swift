@@ -8,6 +8,7 @@ import RelayCore
     @Published private(set) var runtimeReady = false
     @Published private(set) var desktopAttached = false
     private var attachedPID: pid_t?
+    private var desktopGeneration = UUID()
     @Published private(set) var enabled = false
     @Published private(set) var status = "Disconnected"
     @Published var pairing: Pairing?
@@ -25,8 +26,11 @@ import RelayCore
     @Published private(set) var changingDesktop = false
     var credentials: ((UUID) async throws -> Data)?
     var savedCredentials: ((UUID) throws -> Data)?
+    var accountChoices: (() -> [RemoteAccountChoice])?
+    var refreshAccountLimits: (() async -> String?)?
+    var selectDesktopAccount: ((UUID) async -> String?)?
 
-    var desktopReady: Bool { runtimeReady && desktopAttached }
+    var desktopReady: Bool { !changingDesktop && runtimeReady && desktopAttached }
     var needsDesktopAttention: Bool { enabled && !changingDesktop && !desktopReady }
     var usesBridge: Bool { selectedProfileID != nil }
     var launchEnvironment: [String: String] {
@@ -92,6 +96,15 @@ import RelayCore
 
     private func startGateway(_ api: RemoteAPI) {
         let gateway = Gateway(api: api, paths: paths)
+        gateway.accountChoices = { [weak self] in self?.accountChoices?() ?? [] }
+        gateway.refreshAccountLimits = { [weak self] in
+            guard let refresh = self?.refreshAccountLimits else { return "The Mac app is unavailable." }
+            return await refresh()
+        }
+        gateway.selectDesktopAccount = { [weak self] id in
+            guard let self, let select = self.selectDesktopAccount else { return "The Mac app is unavailable." }
+            return await select(id)
+        }
         gateway.onState = { [weak self] state in
             guard let self else { return }
             switch state {
@@ -107,6 +120,7 @@ import RelayCore
 
     func disconnect() {
         enabled = false; UserDefaults.standard.set(false, forKey: "remote_enabled")
+        desktopGeneration = UUID(); attachedPID = nil; desktopAttached = false
         cancelPairing(); gateway?.stop(); gateway = nil; api?.cancelPendingEnrollment()
         monitorTask?.cancel(); monitorTask = nil; monitor?.close(); monitor = nil; runtimeReady = false
     }
@@ -114,6 +128,7 @@ import RelayCore
     func toggleConnection() { enabled ? disconnect() : connect() }
 
     func prepareForDesktopChange() async throws {
+        desktopGeneration = UUID()
         changingDesktop = true; attachedPID = nil; desktopAttached = false
         gateway?.stop(); gateway = nil
         monitor?.close(); monitor = nil; runtimeReady = false
@@ -133,6 +148,8 @@ import RelayCore
     }
 
     @discardableResult func desktopIsAttached() async -> Bool {
+        guard !changingDesktop else { return false }
+        let generation = desktopGeneration
         let pids = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex").filter { !$0.isTerminated }.map(\.processIdentifier)
         if let attachedPID, pids.contains(attachedPID), desktopAttached { return true }
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/relay-cli").path
@@ -151,6 +168,7 @@ import RelayCore
                 return pid
             }.first
         }.value
+        guard generation == desktopGeneration else { return false }
         attachedPID = found
         desktopAttached = found != nil
         return desktopAttached

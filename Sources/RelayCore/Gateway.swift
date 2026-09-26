@@ -6,12 +6,16 @@ import Foundation
     public var onPeerCount: ((Int) -> Void)?
     public var onMethod: ((String) -> Void)?
     public var onDiagnostic: ((String) -> Void)?
+    public var accountChoices: (() -> [RemoteAccountChoice])?
+    public var refreshAccountLimits: (() async -> String?)?
+    public var selectDesktopAccount: ((UUID) async -> String?)?
     private let api: RemoteAPI
     private let paths: RelayPaths
     private var runTask: Task<Void, Never>?
     private var socket: URLSessionWebSocketTask?
     private let session: URLSession
     private var peers: [StreamKey: ProcessChannel] = [:]
+    private var pendingThreadLists: [StreamKey: [String: JSON]] = [:]
     private var activity: [StreamKey: Date] = [:]
     private var legacy: [String: String] = [:]
     private var sequences: [StreamKey: Int] = [:]
@@ -23,6 +27,22 @@ import Foundation
     private var queue: [Data] = []
     private var queuedBytes = 0
     private var generation = UUID()
+    private lazy var accountPicker = AccountPicker(
+        choices: { [weak self] in self?.accountChoices?() ?? [] },
+        refresh: { [weak self] in
+            guard let refresh = self?.refreshAccountLimits else { return "The Mac app is unavailable." }
+            return await refresh()
+        },
+        select: { [weak self] id in
+            guard let select = self?.selectDesktopAccount else { return "The Mac app is unavailable." }
+            return await select(id)
+        },
+        emit: { [weak self] message, key in
+            guard let self, self.peers[key] != nil else { throw RelayError.message("Remote disconnected.") }
+            try self.emit(message, key: key)
+        },
+        diagnostic: { [weak self] in self?.onDiagnostic?($0) }
+    )
     public init(api: RemoteAPI, paths: RelayPaths) {
         self.api = api; self.paths = paths
         let config = URLSessionConfiguration.ephemeral; config.httpCookieStorage = nil; config.urlCache = nil
@@ -36,6 +56,8 @@ import Foundation
         runTask?.cancel(); runTask = nil; socket?.cancel(with: .goingAway, reason: nil); socket = nil
         writer?.cancel(); writer = nil; queue.removeAll(); queuedBytes = 0; generation = UUID()
         let old = peers; peers.removeAll(); for (_, p) in old { p.onClose = nil; p.close() }
+        accountPicker.stop()
+        pendingThreadLists.removeAll()
         activity.removeAll(); delivered.removeAll(); sequences.removeAll(); legacy.removeAll(); assembler = ChunkAssembler(); outbox = Outbox(); cursor = nil
         onPeerCount?(0); onState?(.stopped)
     }
@@ -118,6 +140,12 @@ import Foundation
             let complete: JSON
             if type == "client_message_chunk" { guard let m = try assembler.accept(envelope, key: key) else { return }; complete = m }
             else { complete = message }
+            if accountPicker.handleResponse(complete, key: key) {
+                if peers[key] != nil { activity[key] = Date() }
+                if let seq { delivered[key] = seq }
+                if let next = envelope["cursor"].string { cursor = next }
+                return
+            }
             do { try await forward(complete, key: key) }
             catch {
                 closePeer(key)
@@ -153,7 +181,8 @@ import Foundation
                 peers[key] = peer
                 peer.onMessage = { [weak self, weak peer] response in
                     guard let self, self.peers[key] === peer else { return }
-                    do { try self.emit(response, key: key) } catch { self.closePeer(key); self.onState?(.failed("Remote buffer is full. Reopen the task on your phone.")) }
+                    do { try self.forwardResponse(response, key: key) }
+                    catch { self.closePeer(key); self.onState?(.failed("Remote buffer is full. Reopen the task on your phone.")) }
                 }
                 peer.onClose = { [weak self, weak peer] in
                     guard let self, self.peers[key] === peer else { return }; self.closePeer(key)
@@ -170,7 +199,28 @@ import Foundation
             }
             return
         }
-        activity[key] = Date(); try peer.send(message)
+        activity[key] = Date()
+        if try accountPicker.handleRequest(message, key: key) { return }
+        if message["method"].string == "thread/list", let requestID = Self.rpcKey(message["id"]) {
+            pendingThreadLists[key, default: [:]][requestID] = message["params"]
+        }
+        try peer.send(message)
+    }
+
+    private func forwardResponse(_ response: JSON, key: StreamKey) throws {
+        guard response["method"] == .null,
+              let responseID = Self.rpcKey(response["id"]),
+              let params = pendingThreadLists[key]?.removeValue(forKey: responseID) else {
+            try emit(response, key: key)
+            return
+        }
+        try emit(accountPicker.decorateThreadList(response, params: params, key: key), key: key)
+    }
+
+    private static func rpcKey(_ id: JSON) -> String? {
+        if let value = id.string { return "s:\(value)" }
+        if case .number(let value) = id, value.isFinite { return "n:\(value)" }
+        return nil
     }
     private func emit(_ message: JSON, key: StreamKey) throws {
         let seq = sequences[key, default: 1]; sequences[key] = seq + 1
@@ -204,6 +254,8 @@ import Foundation
     }
     private func closePeer(_ key: StreamKey) {
         let p = peers.removeValue(forKey: key); p?.onClose = nil; p?.close()
+        accountPicker.close(key)
+        pendingThreadLists.removeValue(forKey: key)
         activity.removeValue(forKey: key); assembler.remove(key); delivered.removeValue(forKey: key)
         // Keep monotonically increasing sequence ids within a stream, including re-initialize.
         outbox.remove(key); onPeerCount?(peers.count)

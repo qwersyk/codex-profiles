@@ -179,5 +179,6 @@ struct TestRunner {
         }
         try await SessionRenewalTests.run()
         try await RemoteTests.run()
+        try await AccountPickerTests.run()
     }
 }
